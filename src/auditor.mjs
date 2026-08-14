@@ -27,6 +27,7 @@ import { classifyResource, isMinified, sameRegistrableDomain } from './rules/con
 import { detectLibraries } from './rules/library-rules.mjs';
 import { runActiveChecks, runIdorChecks } from './rules/active-rules.mjs';
 import { mapFinding } from './rules/owasp-map.mjs';
+import { runRecon, probePaths, diffAccessControl, testOpenRedirect, testBackupFiles, fingerprintFromCookies } from './rules/recon-rules.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -93,6 +94,10 @@ const seenBrowserIssue = new Set();   // dedup de issues do navegador
 const idorCandidates = [];            // URLs GET autenticadas com ID numérico
 const seenIdor = new Set();
 let lastNavActivity = 0;              // timestamp da última página nova (modo navegação)
+const firstPartyAssets = [];         // URLs de JS/CSS do seu domínio (p/ backup guessing)
+const seenAssets = new Set();
+let reconCandidatePaths = [];         // paths do recon (robots/sitemap/dicionário)
+let anonProbeResults = {};            // resultado anônimo do probe (p/ diff de acesso)
 let currentPhase = 'pre-login'; // 'pre-login' | 'login' | 'post-login'
 let pageOrigin = '';
 
@@ -1695,6 +1700,18 @@ async function main() {
         }
       } catch { /* url inválida */ }
 
+      // Inventário de assets 1ª parte (JS/CSS) para guessing de backup (.bak/.old...).
+      try {
+        const rt = request.resourceType();
+        if ((rt === 'script' || rt === 'stylesheet')) {
+          const u = new URL(url);
+          if (sameRegistrableDomain(u.host, new URL(pageOrigin).host) && /\.(js|css)$/i.test(u.pathname) && !seenAssets.has(u.pathname)) {
+            seenAssets.add(u.pathname);
+            firstPartyAssets.push(u.origin + u.pathname);
+          }
+        }
+      } catch { /* ignore */ }
+
       const reqData = { url, method, headers, postData, pageOrigin };
       const findings = analyzeRequest(reqData);
 
@@ -1907,10 +1924,26 @@ async function main() {
   logPhaseHeader('PRÉ-LOGIN', '🔐', 'AUDITORIA DA PÁGINA DE LOGIN');
   console.log(chalk.gray('  Analisando a página de login ANTES de você digitar qualquer coisa...'));
 
-  // Auditar a página de login
+  // Recon autônomo (robots/sitemap/.well-known/API docs/CORS/erro/downgrade/fingerprint)
+  // rodando EM PARALELO com a auditoria da página — não precisa de você.
+  console.log(chalk.gray('  🛰️  Recon autônomo em paralelo (não requer interação)...'));
+  const reconPromise = runRecon(context.request, pageOrigin, { active: activeMode })
+    .catch(err => { console.log(chalk.gray(`  (recon falhou: ${err.message})`)); return { findings: [], candidatePaths: [], anonResults: {} }; });
+
+  // Auditar a página de login (roda concorrente ao recon)
   const loginPageFindings = await auditLoginPage(page, page.url());
   allFindings.push(...loginPageFindings);
   visitedUrls.add(page.url());
+
+  // Colher o resultado do recon (já rodou em paralelo)
+  const recon = await reconPromise;
+  reconCandidatePaths = recon.candidatePaths || [];
+  anonProbeResults = recon.anonResults || {};
+  if (recon.findings && recon.findings.length > 0) {
+    console.log(chalk.yellow(`  🛰️  Recon autônomo: ${recon.findings.length} achado(s)`));
+    recon.findings.forEach(logFinding);
+    allFindings.push(...recon.findings.map(f => ({ ...f, phase: f.phase || 'PRÉ-LOGIN' })));
+  }
 
   // Tirar snapshot ANTES do login
   console.log(chalk.gray('\n  📸 Snapshot do storage ANTES do login...'));
@@ -2130,6 +2163,26 @@ async function main() {
     allFindings.push(...pageFindings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
   }
 
+  // 🔓 Controle de acesso: reprova AGORA (autenticado) os paths que o recon achou
+  // e compara com o resultado anônimo do pré-login → detecta acesso quebrado.
+  if (reconCandidatePaths.length > 0) {
+    console.log(chalk.cyan(`\n  🔓 Controle de acesso (anônimo × autenticado) em ${reconCandidatePaths.length} caminho(s)...`));
+    try {
+      const authProbe = await probePaths(context.request, pageOrigin, reconCandidatePaths);
+      const acFindings = diffAccessControl(anonProbeResults, authProbe, pageOrigin);
+      if (acFindings.length > 0) {
+        console.log(chalk.red(`  ⚠️  ${acFindings.length} achado(s) de controle de acesso`));
+        acFindings.forEach(logFinding);
+      } else {
+        console.log(chalk.green('  ✅ Nenhum acesso indevido aparente nos caminhos testados.'));
+      }
+      allFindings.push(...acFindings);
+    } catch (err) { console.log(chalk.red(`  ❌ Erro no diff de acesso: ${err.message}`)); }
+  }
+
+  // Fingerprint da stack pelos cookies de sessão (pós-login)
+  allFindings.push(...fingerprintFromCookies(cookieSnapshotAfter).map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
+
   // Tier 3: testes ATIVOS (só com --active). Enviam requisições ao alvo.
   if (activeMode) {
     console.log(chalk.magenta('\n  🧪 Modo ATIVO: testando métodos HTTP, security.txt e arquivos sensíveis...'));
@@ -2161,6 +2214,29 @@ async function main() {
       } catch (err) {
         console.log(chalk.red(`  ❌ Erro no teste de IDOR: ${err.message}`));
       }
+    }
+
+    // Open redirect (parâmetros de redirecionamento na URL alvo)
+    try {
+      const orFindings = await testOpenRedirect(context.request, targetUrl);
+      if (orFindings.length > 0) {
+        console.log(chalk.red(`  ↪️  ${orFindings.length} open redirect detectado(s)!`));
+        orFindings.forEach(logFinding);
+        allFindings.push(...orFindings);
+      }
+    } catch (err) { console.log(chalk.red(`  ❌ Erro no open redirect: ${err.message}`)); }
+
+    // Arquivos de backup dos assets 1ª parte (.bak/.old/~ ...)
+    if (firstPartyAssets.length > 0) {
+      console.log(chalk.magenta(`  🗄️  Testando backup em ${Math.min(15, firstPartyAssets.length)} asset(s)...`));
+      try {
+        const bkFindings = await testBackupFiles(context.request, firstPartyAssets);
+        if (bkFindings.length > 0) {
+          console.log(chalk.red(`  ⚠️  ${bkFindings.length} arquivo(s) de backup exposto(s)!`));
+          bkFindings.forEach(logFinding);
+        }
+        allFindings.push(...bkFindings);
+      } catch (err) { console.log(chalk.red(`  ❌ Erro no teste de backup: ${err.message}`)); }
     }
   }
 

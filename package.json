@@ -9,7 +9,7 @@
   "scripts": {
     "audit": "node src/auditor.mjs",
     "audit:crawl": "node src/auditor.mjs --crawl",
-    "report": "node src/report-viewer.mjs"
+    "audit:active": "node src/auditor.mjs --active"
   },
   "dependencies": {
     "playwright": "^1.48.0",

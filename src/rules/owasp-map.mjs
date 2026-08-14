@@ -59,8 +59,23 @@ const MAP = {
   // A06 – Vulnerable and Outdated Components
   vulnerable_library:         { owasp: 'A06:2021 – Vulnerable and Outdated Components', cwe: 'CWE-1104', confidence: 'confirmado' },
 
-  // A01 – Broken Access Control (IDOR/BOLA)
+  // A01 – Broken Access Control (IDOR/BOLA, access diff, open redirect)
   idor_suspected:             { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-639', confidence: 'provável' },
+  broken_access_control:      { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-284', confidence: 'provável' },
+  privilege_escalation:       { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-285', confidence: 'provável' },
+  open_redirect:              { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-601', confidence: 'confirmado' },
+
+  // Recon / Security Misconfiguration (A05)
+  robots_disclosure:          { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  sitemap_disclosure:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  openid_config_exposed:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  api_docs_exposed:           { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  graphql_introspection:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  cors_reflected:             { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-942', confidence: 'confirmado' },
+  verbose_error:              { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-209', confidence: 'confirmado' },
+  http_downgrade:             { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-319', confidence: 'confirmado' },
+  tech_fingerprint:           { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  backup_file_exposed:        { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-530', confidence: 'confirmado' },
 
   // A09 – Security Logging and Monitoring Failures
   console_sensitive:          { owasp: 'A09:2021 – Security Logging and Monitoring Failures', cwe: 'CWE-532', confidence: 'confirmado' },
