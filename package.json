@@ -1,7 +1,8 @@
 {
-  "name": "vulcoll",
-  "version": "1.0.0",
-  "description": "Sentinela — Vulnerability Collector & Security Auditor (Playwright)",
+  "name": "sentinela",
+  "version": "2.0.0",
+  "description": "Sentinela — Enterprise Security Auditor & Vulnerability Collector (Playwright + Infra Diagnostics)",
+
   "type": "module",
   "bin": {
     "sentinela": "src/auditor.mjs"

@@ -29,6 +29,24 @@ import { runActiveChecks, runIdorChecks } from './rules/active-rules.mjs';
 import { mapFinding } from './rules/owasp-map.mjs';
 import { runRecon, probePaths, diffAccessControl, testOpenRedirect, testBackupFiles, fingerprintFromCookies } from './rules/recon-rules.mjs';
 
+// Novos módulos de infraestrutura (absorvidos do URL Checker)
+import { scanTcpPorts } from './infra/tcp-scanner.mjs';
+import { measureSocketTiming } from './infra/socket-timing.mjs';
+import { measureLoadPercentiles } from './infra/load-percentiles.mjs';
+import { lookupGeoIP } from './infra/geoip.mjs';
+import { checkDnsblReputation } from './infra/dnsbl-reputation.mjs';
+import { analyzeSocialCards } from './infra/social-cards.mjs';
+
+// Geradores de testes e verificação manual
+import { generateTestArtifacts } from './generators/test-generator.mjs';
+import { enrichWithVerification } from './generators/manual-verification.mjs';
+
+// Novo sistema de relatório
+import { computeScoreBreakdown } from './report/score-breakdown.mjs';
+import { generateEnterpriseHtml } from './report/html-report.mjs';
+import { generateEnterpriseMd } from './report/md-report.mjs';
+import { exportPdf } from './report/pdf-export.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -98,6 +116,10 @@ const firstPartyAssets = [];         // URLs de JS/CSS do seu domínio (p/ backu
 const seenAssets = new Set();
 let reconCandidatePaths = [];         // paths do recon (robots/sitemap/dicionário)
 let anonProbeResults = {};            // resultado anônimo do probe (p/ diff de acesso)
+let infraData = null;                 // dados de infraestrutura (TCP, timing, GeoIP, etc.)
+const auditScreenshots = [];          // screenshots das páginas (base64)
+const auditTimeline = [];             // timeline de eventos
+let pageHtmlContent = '';             // HTML da primeira página (para social cards)
 let currentPhase = 'pre-login'; // 'pre-login' | 'login' | 'post-login'
 let pageOrigin = '';
 
@@ -962,8 +984,9 @@ function generateReport(findings) {
   const reportPath = join(reportDir, `security-audit-${timestamp}.json`);
   const reportMdPath = join(reportDir, `security-audit-${timestamp}.md`);
   const reportHtmlPath = join(reportDir, `security-audit-${timestamp}.html`);
+  const reportPdfPath = join(reportDir, `security-audit-${timestamp}.pdf`);
 
-  // Tier 4: enriquecer com OWASP / CWE / confiança
+  // Enriquecer com OWASP / CWE / confiança
   for (const f of findings) {
     const m = mapFinding(f);
     f.owasp = m.owasp;
@@ -971,47 +994,91 @@ function generateReport(findings) {
     if (!f.confidence) f.confidence = m.confidence;
   }
 
-  // Separar 1ª parte (SEU) de 3ª parte (vendor/SaaS)
-  const firstParty = findings.filter(f => !f.thirdParty);
-  const thirdParty = findings.filter(f => f.thirdParty);
+  // Enriquecer com instruções de verificação manual
+  const enrichedFindings = enrichWithVerification(findings);
 
-  const counts = countBySeverity(firstParty);          // nota/contagem = só 1ª parte
+  // Separar 1ª parte de 3ª parte
+  const firstParty = enrichedFindings.filter(f => !f.thirdParty);
+  const thirdParty = enrichedFindings.filter(f => f.thirdParty);
+
+  const counts = countBySeverity(firstParty);
   const thirdCounts = countBySeverity(thirdParty);
-  const score = computeScore(counts);
-
   const firstPartyIssues = firstParty.filter(f => f.severity !== 'INFO');
 
-  // Tier 4: regressão vs execução anterior do mesmo alvo
+  // Score breakdown por categoria
+  const scoreBreakdown = computeScoreBreakdown(firstPartyIssues);
+  const score = scoreBreakdown.totalScore;
+
+  // Regressão vs execução anterior
   const regression = computeRegression(firstPartyIssues, loadPreviousReport(targetUrl, reportPath));
 
-  const report = {
+  // Gerar artefatos de teste (Playwright, Postman, cURL, server fix)
+  const testArtifacts = generateTestArtifacts(targetUrl, firstPartyIssues);
+
+  const reportData = {
     meta: {
       target: targetUrl,
       timestamp: new Date().toISOString(),
       pagesAudited: visitedUrls.size,
-      totalFindings: findings.length,
+      totalFindings: enrichedFindings.length,
       firstPartyIssues: firstPartyIssues.length,
       thirdPartyIssues: thirdParty.filter(f => f.severity !== 'INFO').length,
       severity: counts,
       thirdPartySeverity: thirdCounts,
       score,
+      grade: scoreBreakdown.grade,
+      gradeLabel: scoreBreakdown.gradeLabel,
       regression: regression.hasPrev
         ? { prevScore: regression.prevScore, prevDate: regression.prevDate, new: regression.new.length, fixed: regression.fixed.length, persisted: regression.persisted }
         : null,
       phases: ['PRÉ-LOGIN', 'LOGIN', 'PÓS-LOGIN'],
     },
+    scoreBreakdown,
+    infra: infraData,
     findings: firstPartyIssues,
     thirdParty: thirdParty.filter(f => f.severity !== 'INFO'),
-    inventory: findings.filter(f => f.severity === 'INFO'),
+    inventory: enrichedFindings.filter(f => f.severity === 'INFO'),
     routes: capturedRoutes,
     pagesVisited: [...visitedUrls],
+    testArtifacts,
   };
 
-  writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
-  writeFileSync(reportMdPath, generateMarkdownReport(report, counts, regression), 'utf8');
-  writeFileSync(reportHtmlPath, generateHtmlReport(report, counts, regression), 'utf8');
+  // Salvar JSON
+  writeFileSync(reportPath, JSON.stringify(reportData, null, 2), 'utf8');
 
-  return { reportPath, reportMdPath, reportHtmlPath, counts, thirdCounts, score, regression };
+  // Salvar Markdown empresarial
+  const mdContent = generateEnterpriseMd({
+    ...reportData,
+    regression,
+    counts,
+    evidenceOf,
+  });
+  writeFileSync(reportMdPath, mdContent, 'utf8');
+
+  // Salvar HTML empresarial
+  const htmlContent = generateEnterpriseHtml({
+    ...reportData,
+    infraData,
+    screenshots: auditScreenshots,
+    timeline: auditTimeline,
+    regression,
+    counts,
+    evidenceOf,
+  });
+  writeFileSync(reportHtmlPath, htmlContent, 'utf8');
+
+  // Tentar exportar PDF (async em background ou sync)
+  let reportPdfGenerated = false;
+  try {
+    exportPdf(reportHtmlPath, reportPdfPath).then(() => {
+      console.log(chalk.gray(`  📄 PDF exportado com sucesso: ${reportPdfPath.substring(reportPdfPath.lastIndexOf('\\') + 1)}`));
+    }).catch(err => {
+      console.log(chalk.gray(`  (PDF export falhou: ${err.message})`));
+    });
+    reportPdfGenerated = true;
+  } catch { /* PDF export falhou */ }
+
+  return { reportPath, reportMdPath, reportHtmlPath, reportPdfPath, counts, thirdCounts, score, regression };
 }
 
 // Extrai os VALORES capturados de um finding (para o relatório detalhado).
@@ -1902,9 +1969,17 @@ async function main() {
   //  FASE 1: PRÉ-LOGIN — Auditar a página de login
   // ══════════════════════════════════════════════════════════
   currentPhase = 'pre-login';
+  auditTimeline.push({ time: new Date().toLocaleTimeString('pt-BR'), text: `Navegando para ${targetUrl}`, type: 'info' });
 
   console.log(chalk.cyan(`\n🌐 Navegando para ${targetUrl}...`));
   const navResponse = await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+  // Capturar screenshot e HTML da primeira página
+  try {
+    const ssBuf = await page.screenshot({ fullPage: false });
+    auditScreenshots.push({ url: page.url(), base64: ssBuf.toString('base64') });
+    pageHtmlContent = await page.content();
+  } catch { /* ignore */ }
 
   // Tier 2: inspecionar TLS/certificado da navegação principal.
   if (navResponse) {
@@ -1924,18 +1999,49 @@ async function main() {
   logPhaseHeader('PRÉ-LOGIN', '🔐', 'AUDITORIA DA PÁGINA DE LOGIN');
   console.log(chalk.gray('  Analisando a página de login ANTES de você digitar qualquer coisa...'));
 
-  // Recon autônomo (robots/sitemap/.well-known/API docs/CORS/erro/downgrade/fingerprint)
-  // rodando EM PARALELO com a auditoria da página — não precisa de você.
-  console.log(chalk.gray('  🛰️  Recon autônomo em paralelo (não requer interação)...'));
+  // Recon autônomo + Diagnóstico de Infraestrutura (rodando EM PARALELO)
+  console.log(chalk.gray('  🛰️  Recon autônomo + Diagnóstico de infraestrutura em paralelo...'));
+  
+  const targetHost = new URL(targetUrl).hostname;
+
   const reconPromise = runRecon(context.request, pageOrigin, { active: activeMode })
     .catch(err => { console.log(chalk.gray(`  (recon falhou: ${err.message})`)); return { findings: [], candidatePaths: [], anonResults: {} }; });
 
-  // Auditar a página de login (roda concorrente ao recon)
+  const infraPromise = (async () => {
+    try {
+      console.log(chalk.gray('  🔌 Escaneando portas TCP, socket timing, GeoIP e reputação...'));
+      const timing = await measureSocketTiming(targetUrl).catch(() => ({ status: 'FAIL' }));
+      const ip = timing.ip || '';
+      
+      const [tcpScan, geoip, reputation, loadPercentiles] = await Promise.all([
+        scanTcpPorts(targetHost).catch(() => ({ ports: [], findings: [] })),
+        lookupGeoIP(ip).catch(() => ({ status: 'INFO' })),
+        checkDnsblReputation(ip, targetHost).catch(() => ({ is_blacklisted: false, findings: [] })),
+        measureLoadPercentiles(targetUrl, 10, 5).catch(() => ({ percentiles: null })),
+      ]);
+
+      const socialCards = analyzeSocialCards(pageHtmlContent, targetUrl);
+
+      return {
+        socketTiming: timing,
+        tcpScan,
+        geoip,
+        reputation,
+        loadPercentiles,
+        socialCards,
+      };
+    } catch (e) {
+      console.log(chalk.gray(`  (infra check falhou: ${e.message})`));
+      return null;
+    }
+  })();
+
+  // Auditar a página de login (roda concorrente ao recon/infra)
   const loginPageFindings = await auditLoginPage(page, page.url());
   allFindings.push(...loginPageFindings);
   visitedUrls.add(page.url());
 
-  // Colher o resultado do recon (já rodou em paralelo)
+  // Colher o resultado do recon e infra
   const recon = await reconPromise;
   reconCandidatePaths = recon.candidatePaths || [];
   anonProbeResults = recon.anonResults || {};
@@ -1943,6 +2049,21 @@ async function main() {
     console.log(chalk.yellow(`  🛰️  Recon autônomo: ${recon.findings.length} achado(s)`));
     recon.findings.forEach(logFinding);
     allFindings.push(...recon.findings.map(f => ({ ...f, phase: f.phase || 'PRÉ-LOGIN' })));
+  }
+
+  infraData = await infraPromise;
+  if (infraData) {
+    if (infraData.tcpScan?.findings?.length > 0) {
+      const tcpFindings = infraData.tcpScan.findings.map(f => ({ ...f, phase: 'PRÉ-LOGIN' }));
+      tcpFindings.forEach(logFinding);
+      allFindings.push(...tcpFindings);
+    }
+    if (infraData.reputation?.findings?.length > 0) {
+      const repFindings = infraData.reputation.findings.map(f => ({ ...f, phase: 'PRÉ-LOGIN' }));
+      repFindings.forEach(logFinding);
+      allFindings.push(...repFindings);
+    }
+    console.log(chalk.green(`  🏗️ Infraestrutura auditada: IP ${infraData.geoip?.ip || '?'}, ${infraData.tcpScan?.open_count || 0} portas abertas, timing ${infraData.socketTiming?.total_ms || 0}ms`));
   }
 
   // Tirar snapshot ANTES do login
