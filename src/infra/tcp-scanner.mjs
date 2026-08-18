@@ -64,12 +64,22 @@ function checkPort(host, port, timeout = 1200) {
 
     sock.on('connect', () => {
       const latency = Date.now() - start;
-      sock.destroy();
-      // Latência < 3ms em IPs não-localhost é suspeita (RST imediato do firewall)
-      const state = (latency < 3 && !['127.0.0.1', '::1', 'localhost'].includes(host))
-        ? 'UNCERTAIN'
-        : 'OPEN';
-      resolve({ port, service, state, latency_ms: latency });
+      
+      // Tentar capturar o Banner do serviço (SSH, FTP, SMTP, MySQL, etc.)
+      let banner = '';
+      const onData = (data) => {
+        banner = data.toString('utf-8').trim().replace(/[\r\n]+/g, ' ');
+      };
+      sock.on('data', onData);
+
+      // Esperar brevemente (250ms) por banner espontâneo
+      setTimeout(() => {
+        sock.destroy();
+        const state = (latency < 3 && !['127.0.0.1', '::1', 'localhost'].includes(host))
+          ? 'UNCERTAIN'
+          : 'OPEN';
+        resolve({ port, service, state, latency_ms: latency, banner: banner ? banner.substring(0, 120) : null });
+      }, 250);
     });
 
     sock.on('timeout', () => {

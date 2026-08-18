@@ -91,7 +91,14 @@ function parseConfiguration() {
   navIdleMs = idleArg ? parseInt(idleArg.split('=')[1] || args[args.indexOf('--idle') + 1]) * 1000 : 180000;
 }
 
-if (!targetUrl) {
+// Nota: a validação de `targetUrl` NÃO pode rodar aqui no top-level do módulo.
+// Quando o daemon importa este arquivo dinamicamente (`await import('../auditor.mjs')`,
+// usado por `sentinela.mjs resume`/`start`), o process.argv nesse instante é o do
+// PRÓPRIO sentinela.mjs (ex.: ['resume', 'sess-...']), não o da URL auditada —
+// `main()` já chama `parseConfiguration()` para reprocessar `process.argv` depois
+// que `runAudit()` injeta a URL real em `process.argv[2]`. Validar aqui cedo demais
+// derrubava o processo inteiro (via process.exit) antes mesmo do daemon abrir o browser.
+function printUsageAndExit() {
   console.log(chalk.red('\n❌ URL não informada!\n'));
   console.log(chalk.white('Uso:'));
   console.log(chalk.cyan('  node src/auditor.mjs https://seu-site.com'));
@@ -201,7 +208,19 @@ export async function runAudit(url, opts = {}, hooks = null, finalizePromise = n
   if (hooks) setSessionHooks(hooks);
   if (finalizePromise) {
     // Quando finalizePromise resolve, simular ENTER para desbloquear o readline
-    finalizePromise.then(() => process.stdin.push('\n'));
+    // (usado no aguardo da fase de login, scope !== 'navigate'). Em processos sem
+    // TTY real (daemon em background) o stdin pode já estar em EOF — nesse caso
+    // process.stdin.push() lança ERR_STREAM_PUSH_AFTER_EOF como exceção não
+    // capturada, derrubando o processo ANTES de gerar o relatório. Os outros
+    // gatilhos de finalização (poller, timeout, activeFinalizePromise no modo
+    // navigate) já cobrem esse caso, então uma falha aqui pode ser ignorada.
+    finalizePromise.then(() => {
+      try {
+        if (!process.stdin.destroyed && process.stdin.readable) {
+          process.stdin.push('\n');
+        }
+      } catch { /* ok — outros gatilhos de finalização cobrem isso */ }
+    });
   }
 
   await main();
@@ -216,12 +235,8 @@ function addTimeline(text, type = 'info') {
   auditTimeline.push({ time, text, type });
 }
 
-try {
-  pageOrigin = new URL(targetUrl).origin;
-} catch {
-  console.log(chalk.red(`❌ URL inválida: ${targetUrl}`));
-  process.exit(1);
-}
+// `pageOrigin` é calculado dentro de main() (após parseConfiguration() reprocessar
+// process.argv) — ver comentário acima de printUsageAndExit().
 
 // ─── Funções Auxiliares ────────────────────────────────────
 
@@ -1736,6 +1751,15 @@ function issueToFinding(issue) {
 async function main() {
   auditTimeline.length = 0;
   parseConfiguration();
+
+  if (!targetUrl) printUsageAndExit();
+  try {
+    pageOrigin = new URL(targetUrl).origin;
+  } catch {
+    console.log(chalk.red(`❌ URL inválida: ${targetUrl}`));
+    process.exit(1);
+  }
+
   printBanner();
 
   console.log(chalk.white(`\n🎯 Alvo: ${chalk.cyan.bold(targetUrl)}`));

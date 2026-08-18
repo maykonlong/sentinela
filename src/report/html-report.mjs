@@ -139,14 +139,15 @@ export function generateEnterpriseHtml({
     .verify ol { padding-left: 20px; margin: 4px 0; }
     .verify li { margin: 2px 0; }
     
-    .cmd-wrapper { position: relative; margin: 6px 0; }
-    .cmd { background: #1a1b1e; color: #51cf66; padding: 8px 36px 8px 12px; border-radius: 6px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 11px; display: block; word-break: break-all; white-space: pre-wrap; line-height: 1.5; }
-    .cmd-pow { color: #69db7c; border-left: 3px solid #51cf66; }
+    .cmd-wrapper { display: flex; flex-direction: column; background: #0f172a; border-radius: 8px; margin: 8px 0; overflow: hidden; border: 1px solid #1e293b; }
+    .cmd-header { display: flex; justify-content: space-between; align-items: center; background: #1e293b; padding: 6px 12px; font-size: 11px; color: #94a3b8; font-weight: 600; border-bottom: 1px solid #334155; }
+    .cmd { color: #38bdf8; padding: 10px 12px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 11px; display: block; word-break: break-all; white-space: pre-wrap; line-height: 1.5; margin: 0; background: transparent; }
+    .cmd-pow { color: #4ade80; }
     
     /* ── Botão Copiar ── */
-    .btn-copy { position: absolute; right: 6px; top: 6px; background: rgba(255,255,255,0.15); border: none; color: #fff; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; transition: all .2s; font-family: sans-serif; display: flex; align-items: center; gap: 4px; }
-    .btn-copy:hover { background: rgba(255,255,255,0.3); }
-    .btn-copy.copied { background: #2f9e44; color: #fff; }
+    .btn-copy { background: #3b82f6; border: none; color: #ffffff; font-size: 11px; padding: 4px 10px; border-radius: 4px; cursor: pointer; transition: all .2s; font-family: inherit; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+    .btn-copy:hover { background: #2563eb; }
+    .btn-copy.copied { background: #16a34a !important; color: #fff !important; }
     
     .btn-action { background: #1c7ed6; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 500; transition: background .2s; }
     .btn-action:hover { background: #1971c2; }
@@ -440,20 +441,29 @@ export function generateEnterpriseHtml({
         <div class="verify-title">🧪 Como Verificar Manualmente & Provar para a Gestão</div>
         <ol>${mv.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
         ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools (Interface Visual):</b> ${esc(mv.devtools)}</p>` : ''}
-        ${mv.consoleSnippet ? `<p style="margin-top:6px;font-weight:600;color:#212529">🖥️ Teste via Console do Navegador (F12 → Console):</p>
+        ${mv.consoleSnippet ? `
         <div class="cmd-wrapper">
-          <span class="cmd" style="color:#67e8f9;background:#0f172a">${esc(mv.consoleSnippet)}</span>
-          <button class="btn-copy" onclick="copyText('${esc(mv.consoleSnippet)}', this)">📋 Copiar Snippet Console</button>
+          <div class="cmd-header">
+            <span>🖥️ Teste via Console do Navegador (F12 → Console)</span>
+            <button class="btn-copy" onclick="copyFromAttr(this)">📋 Copiar Snippet Console</button>
+          </div>
+          <pre class="cmd" style="color:#67e8f9">${esc(mv.consoleSnippet)}</pre>
         </div>` : ''}
-        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Terminal cURL/nc):</p>
+        ${mv.automated ? `
         <div class="cmd-wrapper">
-          <span class="cmd">${esc(mv.automated)}</span>
-          <button class="btn-copy" onclick="copyText('${esc(mv.automated)}', this)">📋 Copiar Terminal</button>
+          <div class="cmd-header">
+            <span>Comando de Validação (Terminal cURL/nc)</span>
+            <button class="btn-copy" onclick="copyFromAttr(this)">📋 Copiar Terminal</button>
+          </div>
+          <pre class="cmd">${esc(mv.automated)}</pre>
         </div>` : ''}
-        ${mv.proofOfWork ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Prova Real (Dump Completo):</p>
+        ${mv.proofOfWork ? `
         <div class="cmd-wrapper">
-          <span class="cmd cmd-pow">${esc(mv.proofOfWork)}</span>
-          <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar Dump</button>
+          <div class="cmd-header">
+            <span>Comando de Prova Real (Dump Completo)</span>
+            <button class="btn-copy" onclick="copyFromAttr(this)">📋 Copiar Dump</button>
+          </div>
+          <pre class="cmd cmd-pow">${esc(mv.proofOfWork)}</pre>
         </div>` : ''}
         <div style="margin-top:10px;padding:12px 14px;background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #1c7ed6;border-radius:6px;font-size:12px;color:#343a40">
           <div style="font-weight:700;color:#1c7ed6;margin-bottom:6px;font-size:12px">
@@ -628,6 +638,15 @@ export function generateEnterpriseHtml({
 
   // ── JavaScript Interativo de Cópia ──
   const jsScript = `<script>
+    function copyFromAttr(btnElement) {
+      const wrapper = btnElement.closest('.cmd-wrapper');
+      if (!wrapper) return;
+      const cmdEl = wrapper.querySelector('.cmd');
+      if (!cmdEl) return;
+      const text = cmdEl.innerText || cmdEl.textContent;
+      copyText(text, btnElement);
+    }
+
     function copyText(text, btnElement) {
       if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).then(() => showSuccess(btnElement)).catch(() => fallbackCopy(text, btnElement));

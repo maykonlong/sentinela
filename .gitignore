@@ -3,6 +3,7 @@ node_modules/
 
 # Relatórios e capturas — CONTÊM DADOS REAIS DOS ALVOS (não commitar!)
 reports/
+sessions/
 *.har
 *.log
 
