@@ -20,6 +20,11 @@
  * nada pra confiar nisso).
  */
 function cookieCaptureContext(f) {
+  // Só se aplica a achado DE COOKIE — checar cookieName evita vazar esse aviso
+  // pra achados de localStorage/sessionStorage (login_storage_*), que não têm
+  // NENHUMA dessas limitações (dá pra ler o valor a qualquer momento via
+  // console, sem depender de repetir o momento exato em que foi criado).
+  if (!f.cookieName) return [];
   const lines = [];
   if (f.flags) {
     const { httpOnly, secure, sameSite, expires } = f.flags;
@@ -27,6 +32,30 @@ function cookieCaptureContext(f) {
   }
   if (f.phase === 'LOGIN' || f.phase === 'PÓS-LOGIN') {
     lines.push(`ATENÇÃO com o teste via curl abaixo: Set-Cookie só é enviado pelo servidor no instante em que o cookie é CRIADO (aqui, durante o fluxo de login/callback) — repetir a requisição numa página comum depois NUNCA mostra esse Set-Cookie de novo, mesmo com o problema presente. Saída vazia aqui NÃO significa corrigido; é limitação física do teste. Use o DevTools/Console abaixo, que leem o cookie já salvo no navegador autenticado.`);
+  }
+  return lines;
+}
+
+/**
+ * Mesmo problema dos cookies, para achados de CORPO de resposta autenticada
+ * (token/senha/role no JSON de retorno de um endpoint logado). Um curl
+ * anônimo pra essa URL não carrega a sessão — na melhor das hipóteses cai em
+ * 401/redirect, na pior devolve uma resposta genérica que parece "corrigido".
+ * A evidência de verdade já foi capturada ao vivo pelo Playwright (visível no
+ * achado); reproduzir exige a MESMA sessão autenticada, via DevTools → Network
+ * (a requisição original está no histórico) ou repetindo a chamada com um
+ * header/cookie de sessão válido.
+ */
+function authenticatedResponseContext(f) {
+  // Sem URL não há o que reproduzir via curl — não faz sentido citar
+  // "endpoint autenticado" pra um achado sem endpoint algum (ex.: diff de
+  // localStorage, que não tem `url`).
+  if (!f.url) return [];
+  const lines = [];
+  const field = f.tokenField || f.field || (Array.isArray(f.fieldsExposed) ? f.fieldsExposed.join(', ') : null);
+  if (field) lines.push(`Campo capturado ao vivo na resposta: "${field}".`);
+  if (f.phase === 'LOGIN' || f.phase === 'PÓS-LOGIN' || /\/api\//.test(f.url)) {
+    lines.push(`ATENÇÃO: esta é uma resposta de endpoint AUTENTICADO. Um curl anônimo (sem cookie/token de sessão) não reproduz o mesmo corpo — costuma cair em 401/redirect, o que NÃO significa que o problema foi corrigido. Para reproduzir de verdade: F12 → Network → repita a ação que chama esse endpoint → aba Response mostra o corpo exato capturado pelo auditor. Alternativa: curl com "-H 'Cookie: <cole sua sessão>'" ou "-H 'Authorization: Bearer <seu token>'".`);
   }
   return lines;
 }
@@ -162,6 +191,39 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
   // STORAGE
   // ════════════════════════════════════════════════════
+
+  // Diffs de storage capturados durante o login: não têm URL (não são uma
+  // requisição, são um snapshot antes/depois) — o teste confiável é reler a
+  // chave agora, via console, não tentar reproduzir via curl.
+  login_storage_added: (f) => ({
+    title: `Validação & Prova Real para Chave "${f.key}" Criada no Login (${f.storage || 'storage'})`,
+    steps: [
+      `1. Teste via Console: leia a chave "${f.key}" no ${f.storage || 'localStorage'} agora (após logar).`,
+      `2. PROVA REAL: capturado ao vivo pela auditoria, valor: ${f.valuePreview || '(ver relatório)'}. Se a chave existir com um valor parecido, confirma o comportamento.`,
+    ],
+    devtools: `F12 → Application → ${f.storage === 'sessionStorage' ? 'Session Storage' : 'Local Storage'} → linha "${f.key}".`,
+    consoleSnippet: `${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}")`,
+  }),
+
+  login_storage_changed: (f) => ({
+    title: `Validação & Prova Real para Chave "${f.key}" Alterada no Login (${f.storage || 'storage'})`,
+    steps: [
+      `1. Teste via Console: leia a chave "${f.key}" no ${f.storage || 'localStorage'} agora.`,
+      `2. PROVA REAL: capturado ao vivo — antes: ${f.beforePreview || '?'}, depois: ${f.afterPreview || '?'}.`,
+    ],
+    devtools: `F12 → Application → ${f.storage === 'sessionStorage' ? 'Session Storage' : 'Local Storage'} → linha "${f.key}".`,
+    consoleSnippet: `${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}")`,
+  }),
+
+  login_storage_removed: (f) => ({
+    title: `Validação & Prova Real para Chave "${f.key}" Removida no Login (${f.storage || 'storage'})`,
+    steps: [
+      `1. Teste via Console: a chave "${f.key}" NÃO deve mais existir no ${f.storage || 'localStorage'} após logar (retorna null).`,
+      `2. PROVA REAL: ${f.note || 'capturado ao vivo pela auditoria — a chave existia antes do login e sumiu depois.'}`,
+    ],
+    devtools: `F12 → Application → ${f.storage === 'sessionStorage' ? 'Session Storage' : 'Local Storage'} → confirmar ausência de "${f.key}".`,
+    consoleSnippet: `${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}") === null`,
+  }),
 
   storage_sensitive_data: (f) => ({
     title: `Validação & Prova Real para Dados Sensíveis no ${f.storage || 'localStorage'}`,
@@ -536,6 +598,95 @@ const VERIFICATION_MAP = {
     };
   },
 
+  no_rate_limit: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Ausência de Rate Limit no Login`,
+      steps: [
+        `Evidência já capturada: ${f.currentValue || '5 tentativas sequenciais com status/tempo idênticos'}.`,
+        `1. Teste focado: repita o comando abaixo 5x seguidas (credenciais inválidas, nunca uma senha real) e compare o status HTTP e o tempo de cada uma.`,
+        `2. PROVA REAL: se as 5 respostas tiverem o MESMO status e tempo parecido — sem HTTP 429, sem CAPTCHA, sem atraso crescente — a ausência de rate limit está confirmada. Qualquer uma dessas defesas aparecendo já invalidaria o achado.`,
+      ],
+      devtools: `F12 → Network → aba Timing, comparando a duração de cada tentativa.`,
+      automated: `for i in 1 2 3 4 5; do curl -sk -o /dev/null -w "tentativa $i: HTTP %{http_code} em %{time_total}s\\n" -X POST "${url}" -d "user=teste$i@invalid&pass=errada$i"; done`,
+      proofOfWork: `curl -skD - -X POST "${url}" -d "user=teste@invalid&pass=errada" -o /dev/null`,
+    };
+  },
+
+  user_enumeration: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Enumeração de Usuário no Login`,
+      steps: [
+        `Evidência já capturada: ${f.currentValue || 'a resposta variou entre dois "usuários" igualmente inexistentes'}.`,
+        `1. Teste focado: envie duas tentativas de login com e-mails inexistentes DIFERENTES (nunca um usuário real) e senha errada.`,
+        `2. PROVA REAL: se o texto/tamanho/tempo da resposta mudar de forma consistente entre os dois, o sistema revela se o usuário existe (mensagem "não encontrado" vs "senha errada", ou diferença de tempo repetida).`,
+      ],
+      devtools: `F12 → Network → comparar o corpo da resposta das duas tentativas lado a lado.`,
+      automated: `curl -sk -X POST "${url}" -d "user=sentinela-probe-1@test.invalid&pass=errada" ; echo "---" ; curl -sk -X POST "${url}" -d "user=sentinela-probe-2@test.invalid&pass=errada"`,
+      proofOfWork: `curl -skD - -X POST "${url}" -d "user=sentinela-probe-1@test.invalid&pass=errada" -o /dev/null`,
+    };
+  },
+
+  weak_password_policy: () => ({
+    title: `Validação & Prova Real para Política de Senha Fraca/Ausente`,
+    steps: [
+      `1. Teste via Console: rode o snippet para listar os campos de senha e seus atributos (minlength, pattern).`,
+      `2. PROVA REAL: se NENHUM campo tiver minlength≥8 nem pattern de complexidade nem texto de requisito próximo, a ausência de pista de política está confirmada NO FRONT-END.`,
+      `   → Isso NÃO prova que o backend aceita senha fraca — é uma heurística de UI. Para confirmar de verdade, tente cadastrar/trocar para uma senha como "123456" e veja se o servidor rejeita.`,
+    ],
+    devtools: `F12 → Elements → inspecionar o <input type="password"> → aba Attributes (minlength, pattern).`,
+    consoleSnippet: `Array.from(document.querySelectorAll('input[type="password"]')).map(i => ({ name: i.name || i.id, minlength: i.minLength > 0 ? i.minLength : '(ausente)', pattern: i.pattern || '(ausente)' }))`,
+  }),
+
+  idor_confirmed: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para IDOR/BOLA CONFIRMADO (2 contas)`,
+      steps: [
+        `Evidência já capturada: ${f.currentValue || 'a Conta B acessou com sucesso um objeto que pertence à Conta A'}.`,
+        `1. Teste focado: com a sessão da CONTA B (diferente da conta original testada), repita a requisição ao objeto abaixo.`,
+        `2. PROVA REAL: se retornar 200 com dado de verdade (não uma tela de erro/login), a Conta B está lendo um objeto que não é dela — IDOR confirmado, exatamente como capturado durante a auditoria.`,
+      ],
+      devtools: `F12 → Network → repita a requisição logado como Conta B → aba Response.`,
+      automated: `curl -sk -H "Cookie: <cole aqui o cookie de sessão da CONTA B>" "${url}"`,
+      proofOfWork: `curl -skD - -H "Cookie: <cole aqui o cookie de sessão da CONTA B>" "${url}" -o /dev/null`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
+  // SOURCE MAP (conteúdo real baixado)
+  // ════════════════════════════════════════════════════
+
+  source_map_content_exposed: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Source Map com Código-Fonte Exposto`,
+      steps: [
+        `1. Teste focado: baixar o .map (é um arquivo estático público — o mesmo comando abaixo já reproduz 100% do que o auditor viu).`,
+        `2. PROVA REAL: procurar a chave "sourcesContent" no JSON — se vier preenchida com código legível (não minificado), o vazamento está confirmado.`,
+        f.exampleFiles?.length ? `Arquivos de origem revelados: ${f.exampleFiles.slice(0, 5).join(', ')}${f.exampleFiles.length > 5 ? ', …' : ''}.` : null,
+      ].filter(Boolean),
+      devtools: `F12 → Sources → aba "Page" → procurar pelo arquivo .map (o DevTools já usa ele pra mostrar o código original).`,
+      automated: `curl -sk "${url}" | grep -o '"sourcesContent"' | head -1`,
+      proofOfWork: `curl -sk "${url}" | head -c 500`,
+    };
+  },
+
+  source_map_internal_routes: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Rotas Internas Reveladas pelo Source Map`,
+      steps: [
+        `1. Teste focado: baixar o .map e listar o array "sources" — são os paths de arquivo do build original.`,
+        `2. PROVA REAL: ${f.paths?.length ? `paths já identificados como sensíveis: ${f.paths.slice(0, 10).join(', ')}${f.paths.length > 10 ? ', …' : ''}.` : 'procurar paths contendo /api/, /internal/, /admin/ ou /routes/.'}`,
+      ],
+      devtools: `F12 → Sources → aba "Page" → árvore de arquivos do source map.`,
+      automated: `curl -sk "${url}" | grep -oE '"sources":\\[[^]]*\\]' | head -c 500`,
+      proofOfWork: `curl -sk "${url}" | head -c 500`,
+    };
+  },
+
   session_fixation: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
@@ -854,16 +1005,30 @@ const VERIFICATION_MAP = {
 
 // ── Fallback genérico ───────────────────────────────────────
 
+// Fallback para types sem gerador dedicado. Usado como rede de segurança —
+// mas "genérico" não pode significar "instrução vazia": nunca mostre o slug
+// técnico cru como step, sempre dê ALGO reproduzível (dump do corpo, não só
+// headers — a maioria dos types sem gerador dedicado depende de CONTEÚDO,
+// não de headers), e avise quando a evidência exigir sessão autenticada.
+function humanizeType(type) {
+  return String(type || '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+}
+
 const GENERIC_VERIFICATION = (f, targetUrl) => {
   const url = sanitizeUrl(f.url, targetUrl);
+  const subject = f.label || f.note || humanizeType(f.type);
+  const context = [...cookieCaptureContext(f), ...authenticatedResponseContext(f)];
   return {
-    title: `Validação & Prova Real: ${f.label || f.type}`,
+    title: `Validação & Prova Real: ${subject}`,
     steps: [
-      `1. Teste focado: ${f.type}`,
-      `2. PROVA REAL: ${f.risk || 'Inspecionar na página auditada'}`,
+      ...context,
+      `1. Teste focado: ${f.risk || subject}`,
+      `2. PROVA REAL: baixar o conteúdo completo (comando 2) e conferir manualmente — o comando 1 é só um recorte.`,
     ],
-    devtools: `F12 → verificar conforme a descrição.`,
-    automated: url ? `curl -skD - "${url}" -o /dev/null` : null,
+    devtools: context.some(l => /DevTools|Network|Application/.test(l))
+      ? undefined // já orientado no contexto acima, não duplicar
+      : `F12 → inspecionar conforme: ${subject}.`,
+    automated: url ? `curl -sk "${url}" | head -c 500` : null,
     proofOfWork: url ? `curl -skD - "${url}" -o /dev/null` : null,
   };
 };
