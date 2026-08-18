@@ -519,11 +519,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para CSRF em Formulário`,
       steps: [
-        `1. Teste focado: Buscar tokens ocultos no formulário via Console ou terminal.`,
-        `2. PROVA REAL: Tentar submeter o formulário via POST sem enviar token/cookie CSRF e verificar se o servidor aceita a ação (HTTP 200/302).`,
+        `1. Teste via Console: Executar o snippet no Console (F12) para listar os formulários e confirmar se faltam tokens de proteção (anti-CSRF).`,
+        `2. PROVA REAL (Terminal): Baixar o HTML da página e buscar por campos ocultos do tipo token/nonce.`,
       ],
-      devtools: `F12 → Elements → inspecionar o formulário.`,
-      consoleSnippet: `Array.from(document.forms).map(f => ({ action: f.action, method: f.method, csrfInputs: Array.from(f.querySelectorAll('input[type="hidden"]')).filter(i => /csrf|token|nonce/i.test(i.name || i.id)) }))`,
+      devtools: `F12 → Elements → Ctrl+F → buscar por "<form" ou "input type=hidden".`,
+      consoleSnippet: `(() => { const forms = Array.from(document.forms).map(f => { const csrf = Array.from(f.querySelectorAll('input[type="hidden"]')).filter(i => /csrf|token|nonce/i.test(i.name || i.id)); return { formAction: f.action || window.location.href, method: (f.method || 'GET').toUpperCase(), temProtecaoCsrf: csrf.length > 0 ? '✅ SIM' : '❌ AUSENTE (Vulnerável)' }; }); console.table(forms); return '🔍 Auditando proteção CSRF nos formulários...'; })()`,
       automated: `curl -sk "${url}" | grep -iE "csrf|_token|nonce"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 5 -i "<form"`,
     };
@@ -603,11 +603,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Ausência de Política de Privacidade (LGPD)`,
       steps: [
-        `1. Teste focado: Buscar no DOM do HTML links para 'privacidade' ou 'lgpd'.`,
-        `2. PROVA REAL: Listar todos os links da página para confirmar a inexistência do link de transparência.`,
+        `1. Teste via Console: Executar o snippet no Console (F12) para buscar links de Política de Privacidade/LGPD no DOM.`,
+        `2. PROVA REAL (Terminal): Baixar o HTML com cURL e confirmar a ausência de links de transparência (Art. 9º LGPD).`,
       ],
-      devtools: `F12 → Console → verificar links de rodapé.`,
-      consoleSnippet: `Array.from(document.querySelectorAll('a[href]')).filter(a => /privacidade|privacy|lgpd/i.test(a.href + a.innerText)).length ? '✅ Política Encontrada' : '❌ AUSENTE (Violação LGPD Art. 9º)'`,
+      devtools: `F12 → Elements → Ctrl+F → buscar por "privacidade" ou "privacy".`,
+      consoleSnippet: `(() => { const links = Array.from(document.querySelectorAll('a[href]')).filter(a => /privacidade|privacy|lgpd/i.test(a.href + a.innerText)); if (links.length) { console.table(links.map(l => ({ texto: l.innerText.trim(), link: l.href }))); return '✅ Política de Privacidade ENCONTRADA no DOM!'; } return '❌ AUSENTE: Nenhum link de Política de Privacidade localizado (Violação LGPD Art. 9º)'; })()`,
       automated: `curl -sk "${url}" | grep -iE "privacidade|privacy|lgpd"`,
       proofOfWork: `curl -sk "${url}" | grep -n -i "href=" | grep -iE "privacidade|privacy|lgpd"`,
     };
@@ -618,11 +618,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Opt-in em Formulário (LGPD)`,
       steps: [
-        `1. Teste focado: Buscar checkboxes de aceite em formulários de cadastro.`,
-        `2. PROVA REAL: Inspecionar o HTML das tags <form> para garantir a presença de um checkbox não pré-marcado.`,
+        `1. Teste via Console: Executar o snippet no Console (F12) para checar se o formulário possui checkbox de aceite LGPD.`,
+        `2. PROVA REAL (Terminal): Baixar o HTML da página e verificar as tags de input do tipo checkbox.`,
       ],
       devtools: `F12 → Elements → inspecionar os campos do formulário.`,
-      consoleSnippet: `Array.from(document.forms).map(f => ({ action: f.action, hasConsentCheckbox: !!f.querySelector('input[type="checkbox"]') }))`,
+      consoleSnippet: `(() => { const res = Array.from(document.forms).map(f => ({ formAction: f.action || window.location.href, temCheckboxConsentimento: f.querySelector('input[type="checkbox"]') ? '✅ SIM' : '❌ AUSENTE (Sem opt-in explícito)' })); console.table(res); return '🔍 Verificando consentimento LGPD nos formulários...'; })()`,
       automated: `curl -sk "${url}" | grep -iE "<form|<input.*checkbox"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 5 -i "<form"`,
     };
@@ -633,11 +633,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Disparo de Cookies Sem Consentimento`,
       steps: [
-        `1. Teste focado: Inspecionar requisições para domínios de rastreamento (Analytics/Pixel/Hotjar) na abertura inicial.`,
+        `1. Teste via Console: Executar no Console (F12) para detectar se trackers (Analytics, Pixel, Hotjar) foram carregados sem autorização prévia.`,
         `2. PROVA REAL: Exibir os scripts de terceiros injetados antes da interação do usuário com o banner LGPD.`,
       ],
       devtools: `F12 → Network → filtrar "analytics", "pixel", "facebook" ou "hotjar".`,
-      consoleSnippet: `Array.from(document.scripts).map(s => s.src).filter(src => /google-analytics|facebook\.net|hotjar|tiktok|clarity/i.test(src))`,
+      consoleSnippet: `(() => { const trackers = Array.from(document.scripts).map(s => s.src).filter(src => /google-analytics|facebook\.net|hotjar|tiktok|clarity/i.test(src)); if (trackers.length) { console.table(trackers.map(t => ({ tracker: t.split('/').slice(-2).join('/'), urlCompleta: t }))); return '⚠️ ATENÇÃO: Trackers disparados antes do consentimento do usuário!'; } return '✅ Limpo: Nenhum tracker de terceiros detectado no carregamento inicial.'; })()`,
       automated: `curl -sk "${url}" | grep -iE "google-analytics|facebook\.net|hotjar|tiktok|clarity"`,
       proofOfWork: `curl -sk "${url}" | grep -n -i "<script"`,
     };
