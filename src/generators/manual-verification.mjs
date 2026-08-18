@@ -168,11 +168,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para "${f.match || 'innerHTML'}"`,
       steps: [
-        `1. Teste via Console: Abrir F12 → Console e rodar o snippet para listar elementos com HTML injetado.`,
-        `2. PROVA REAL: Exibe no console os seletores e nós do DOM alterados via innerHTML sem sanitização.`,
+        `1. Teste via Console: Abrir F12 → Console e executar o snippet para verificar se scripts externos usam innerHTML sem sanitização.`,
+        `2. PROVA REAL (Terminal): Baixar o script estático com cURL e confirmar as linhas exatas onde a atribuição direta a innerHTML ocorre.`,
       ],
-      devtools: `F12 → Sources → Ctrl+Shift+F → buscar "${f.match || 'innerHTML'}".`,
-      consoleSnippet: `document.querySelectorAll('*').forEach(el => { if (el.children.length === 0 && el.innerHTML.includes('<')) console.log(el); })`,
+      devtools: `F12 → Sources → Ctrl+Shift+F → buscar por "${f.match || 'innerHTML'}".`,
+      consoleSnippet: `(() => { const res = []; performance.getEntriesByType('resource').filter(r => r.initiatorType === 'script' || r.name.endsWith('.js')).forEach(s => fetch(s.name).then(r => r.text()).then(t => { if (t.includes('innerHTML')) res.push({ script: s.name, ocorrencias: (t.match(/innerHTML/g) || []).length }); console.table(res); })); return '🔍 Verificando scripts carregados no DOM...'; })()`,
       automated: `curl -sk "${url}" | grep -n "${f.match || 'innerHTML'}"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 3 "${f.match || 'innerHTML'}"`,
     };
