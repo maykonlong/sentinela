@@ -159,20 +159,30 @@ capturedRoutes.push = function (...items) {
  * Quando importado pelo daemon, aceita hooks e finalizePromise.
  */
 export async function runAudit(url, opts = {}, hooks = null, finalizePromise = null) {
-  // Sobrescrever args globais para o modo programático
-  if (url) { process.argv[2] = url; }
-  if (opts.scope === 'login') process.argv.push('--login-only', '--yes');
-  else if (opts.scope === 'crawl') process.argv.push('--crawl', '--yes');
-  else process.argv.push('--yes');
+  // Mapear opções para flags CLI que o auditor.mjs reconhece
+  if (url) process.argv[2] = url;
+
+  // Escopo → flag correta
+  if (opts.scope === 'login')    process.argv.push('--login-only');
+  if (opts.scope === 'crawl')    process.argv.push('--crawl');
+  if (opts.scope === 'navigate') process.argv.push('--navigate');
+  // 'single' é o padrão, sem flag extra
+
+  // Timeout: sentinela.mjs passa em minutos → converter para segundos para o auditor
+  if (opts.timeoutMs) {
+    const secs = Math.round(opts.timeoutMs / 1000);
+    process.argv.push('--timeout', String(secs));
+  }
+
   if (opts.activeMode) process.argv.push('--active');
+
+  // Pular perguntas interativas — as respostas já vêm via opts
+  process.argv.push('--yes');
 
   if (hooks) setSessionHooks(hooks);
   if (finalizePromise) {
-    // Quando finalizePromise resolve, sinalizar para o main() encerrar
-    finalizePromise.then(() => {
-      // Simular ENTER para desbloquear o readline (modo navegação)
-      process.stdin.push('\n');
-    });
+    // Quando finalizePromise resolve, simular ENTER para desbloquear o readline
+    finalizePromise.then(() => process.stdin.push('\n'));
   }
 
   await main();
@@ -2216,13 +2226,10 @@ async function main() {
 
     // Gatilho 2: poller a cada 1.5s
     const poller = setInterval(() => {
-      // Modo navegação: para por INATIVIDADE (sem página nova por navIdleMs).
-      // Só conta a partir da 1ª página autenticada (lastNavActivity > 0), então
-      // o login/2FA nunca dispara o encerramento.
+      // Modo navegação: NÃO finaliza automaticamente por inatividade nem por redirect.
+      // O usuário navega livremente até clicar em "Finalizar" no control server
+      // ou rodar `node sentinela.mjs done` (que invoca finalizePromise).
       if (scope === 'navigate') {
-        if (lastNavActivity > 0 && Date.now() - lastNavActivity > navIdleMs) {
-          finish(`inatividade — nenhuma página nova por ${Math.round(navIdleMs / 1000)}s`);
-        }
         return;
       }
       // Demais modos: auto-detecção de saída da tela de login.
@@ -2416,35 +2423,33 @@ async function main() {
     }
   }
 
-  // Modo crawl: navegar por links internos
-  if (scope === 'crawl') {
-    console.log(chalk.cyan('\n🕷️  Modo crawl: buscando links internos...'));
-    const links = await collectInternalLinks(page);
-    const uniqueLinks = [...new Set(links)].filter(l => !visitedUrls.has(l));
-    console.log(chalk.gray(`  Encontrados ${uniqueLinks.length} links internos para auditar`));
+  // Modo navegação livre acompanhada (navigate): escuta cada clique/URL que o usuário navega
+  if (scope === 'navigate') {
+    console.log(chalk.cyan('\n🧭 Modo NAVEGAÇÃO LIVRE ativo: Navegue pelas telas do sistema no Edge.'));
+    console.log(chalk.white('   Todas as páginas visitadas serão auditadas em tempo real.'));
+    console.log(chalk.gray('   Para concluir: clique em "Finalizar" em http://localhost:3141 ou execute node sentinela.mjs done\n'));
 
-    for (const link of uniqueLinks.slice(0, 20)) { // Limitar a 20 páginas
-      if (visitedUrls.has(link)) continue;
-      visitedUrls.add(link);
-
+    // Escutar navegações do usuário no Playwright
+    const onFrameNavigated = async (frame) => {
+      if (frame !== page.mainFrame()) return;
+      const url = frame.url();
+      if (!url || !url.startsWith('http') || visitedUrls.has(url)) return;
+      visitedUrls.add(url);
+      console.log(chalk.cyan(`\n🔍 Auditando nova página visitada: ${url}`));
       try {
-        await page.goto(link, { waitUntil: 'networkidle', timeout: 15000 });
-        await page.waitForTimeout(1000); // Aguardar SPA carregar
-
-        const findings = await collectPageData(page, link);
-        allFindings.push(...findings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
-
-        // Coletar mais links da nova página
-        const newLinks = await collectInternalLinks(page);
-        for (const nl of newLinks) {
-          if (!visitedUrls.has(nl) && !uniqueLinks.includes(nl)) {
-            uniqueLinks.push(nl);
-          }
-        }
+        await page.waitForTimeout(1000); // Aguardar render/SPA
+        const pageFindings = await collectPageData(page, url);
+        allFindings.push(...pageFindings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
       } catch (err) {
-        console.log(chalk.red(`  ❌ Erro ao navegar para ${link}: ${err.message}`));
+        console.log(chalk.gray(`  (Erro ao auditar ${url}: ${err.message})`));
       }
-    }
+    };
+
+    page.on('framenavigated', onFrameNavigated);
+
+    // Aguardar o sinal de finalização (HTTP finalize, .finalize file, ou browser.close)
+    await finalizePromise;
+    page.off('framenavigated', onFrameNavigated);
   }
 
   } // fim do bloco (scope !== 'login')
