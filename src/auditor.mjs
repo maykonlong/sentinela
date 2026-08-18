@@ -167,7 +167,10 @@ capturedRoutes.push = function (...items) {
  * Quando chamado diretamente (node auditor.mjs), usa o fluxo normal.
  * Quando importado pelo daemon, aceita hooks e finalizePromise.
  */
+let activeFinalizePromise = null;
+
 export async function runAudit(url, opts = {}, hooks = null, finalizePromise = null) {
+  activeFinalizePromise = finalizePromise;
   // Mapear opções para flags CLI que o auditor.mjs reconhece
   if (url) process.argv[2] = url;
 
@@ -1069,7 +1072,7 @@ function generateReport(findings) {
   }
 
   // Enriquecer com instruções de verificação manual
-  const enrichedFindings = enrichWithVerification(findings);
+  const enrichedFindings = enrichWithVerification(findings, targetUrl);
 
   // Separar 1ª parte de 3ª parte
   const firstParty = enrichedFindings.filter(f => !f.thirdParty);
@@ -2458,7 +2461,9 @@ async function main() {
     page.on('framenavigated', onFrameNavigated);
 
     // Aguardar o sinal de finalização (HTTP finalize, .finalize file, ou browser.close)
-    await finalizePromise;
+    if (activeFinalizePromise) {
+      await activeFinalizePromise;
+    }
     page.off('framenavigated', onFrameNavigated);
   }
 
