@@ -80,7 +80,7 @@
  * Ambas só entram no cálculo se produzirem achado.
  */
 const CATEGORIES = [
-  { id: 'headers',   label: 'Headers de Segurança',           maxPts: 15, defaultEvaluated: true, types: ['missing_security_header', 'weak_security_header', 'information_disclosure_header', 'cors_wildcard', 'cors_credentials', 'cors_reflected', 'cache_control_sensitive', 'http_method_enabled'] },
+  { id: 'headers',   label: 'Headers de Segurança',           maxPts: 15, defaultEvaluated: true, types: ['missing_security_header', 'weak_security_header', 'information_disclosure_header', 'cors_wildcard', 'cors_credentials', 'cors_reflected', 'cache_control_sensitive', 'http_method_enabled', 'duplicate_security_header'] },
   { id: 'cookies',   label: 'Cookies',                        maxPts: 12, defaultEvaluated: true, types: ['cookie_insecure_flags', 'cookie_sensitive_no_httponly', 'cookie_missing_secure_prefix'] },
   { id: 'tls',       label: 'TLS / Certificado',              maxPts: 15, defaultEvaluated: true, types: ['weak_tls', 'cert_expired', 'cert_expiring', 'cert_self_signed', 'no_https', 'http_downgrade'] },
   { id: 'storage',   label: 'Storage (localStorage/session)', maxPts: 10, defaultEvaluated: true, types: ['storage_sensitive_data', 'storage_jwt_exposed', 'pii_in_storage', 'pii_in_storage_value'] },

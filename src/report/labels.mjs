@@ -34,6 +34,7 @@ export const TYPE_LABELS = {
   cors_credentials:              'CORS aceita envio de credenciais',
   cors_reflected:                'CORS reflete origem arbitrária',
   cache_control_sensitive:       'Página autenticada sem Cache-Control: no-store',
+  duplicate_security_header:     'Header de segurança duplicado/conflitante',
   no_https:                      'Site servido sem HTTPS',
   http_downgrade:                'Conteúdo também servido via HTTP',
 

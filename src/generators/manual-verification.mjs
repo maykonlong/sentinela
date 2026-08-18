@@ -124,6 +124,21 @@ const VERIFICATION_MAP = {
     };
   },
 
+  duplicate_security_header: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Header "${f.header}" Duplicado`,
+      steps: [
+        `Evidência já capturada (valores distintos vistos na mesma resposta): ${f.currentValue || '(ver relatório)'}.`,
+        `1. Teste focado: liste TODOS os headers da resposta — ao contrário de outros achados, aqui o curl reproduz fielmente, porque ele imprime cada linha de header como recebida (não colapsa duplicatas como o navegador/Playwright fazem internamente).`,
+        `2. PROVA REAL: se "${f.header}" aparecer DUAS OU MAIS VEZES no dump abaixo com valores diferentes, o conflito está confirmado — normalmente sinal de duas camadas de proxy/CDN sobrepostas.`,
+      ],
+      devtools: `F12 → Network → clique no documento → Response Headers (o painel do DevTools também colapsa; use "view source" dos headers se disponível, ou confie no curl acima).`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -ci "^${f.header}:"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null | grep -i "^${f.header}:"`,
+    };
+  },
+
   information_disclosure_header: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
@@ -480,7 +495,7 @@ const VERIFICATION_MAP = {
   // RECON / EXPOSIÇÃO
   // ════════════════════════════════════════════════════
 
-  swagger_exposed: (f, targetUrl) => {
+  api_docs_exposed: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para OpenAPI/Swagger Público`,
@@ -494,7 +509,7 @@ const VERIFICATION_MAP = {
     };
   },
 
-  graphql_exposed: (f, targetUrl) => {
+  graphql_introspection: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para GraphQL Introspection`,
@@ -508,21 +523,22 @@ const VERIFICATION_MAP = {
     };
   },
 
-  robots_sensitive_paths: (f, targetUrl) => {
+  robots_disclosure: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para robots.txt`,
       steps: [
         `1. Teste focado: Baixar robots.txt.`,
         `2. PROVA REAL: Exibir todas as linhas "Disallow:" e testar o acesso HTTP em cada uma delas.`,
-      ],
+        f.sample?.length ? `Caminhos sensíveis já identificados: ${f.sample.join(', ')}.` : null,
+      ].filter(Boolean),
       devtools: `Acessar robots.txt no navegador.`,
       automated: `curl -sk "${url}"`,
       proofOfWork: `curl -sk "${url}" | grep -i "Disallow:"`,
     };
   },
 
-  error_verbose: (f, targetUrl) => {
+  verbose_error: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para Erro Verboso`,
@@ -584,7 +600,7 @@ const VERIFICATION_MAP = {
     };
   },
 
-  login_credentials_http: (f, targetUrl) => {
+  login_form_http: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para Credenciais em HTTP`,
@@ -884,7 +900,7 @@ const VERIFICATION_MAP = {
     };
   },
 
-  idor: (f, targetUrl) => {
+  idor_suspected: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para IDOR`,
@@ -912,7 +928,7 @@ const VERIFICATION_MAP = {
     };
   },
 
-  backup_file: (f, targetUrl) => {
+  backup_file_exposed: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
     return {
       title: `Validação & Prova Real para Arquivo de Backup Exposto`,
@@ -926,16 +942,20 @@ const VERIFICATION_MAP = {
     };
   },
 
-  http_method: (f, targetUrl) => {
+  http_method_enabled: (f, targetUrl) => {
     const url = sanitizeUrl(f.url, targetUrl);
+    // f.allow tem os métodos REAIS reportados pelo servidor (ex.: "GET, POST,
+    // TRACE, PUT") — testar com o primeiro deles em vez de sempre TRACE fixo.
+    const firstMethod = (f.allow || '').split(',').map(s => s.trim()).find(Boolean) || 'TRACE';
     return {
       title: `Validação & Prova Real para Métodos HTTP Inseguros`,
       steps: [
+        `Evidência já capturada: Allow: ${f.allow || '(ver relatório)'}.`,
         `1. Teste focado: Testar se o método responde 200 OK.`,
-        `2. PROVA REAL: Executar o método TRACE/OPTIONS e exibir os métodos permitidos retornados no header \`Allow:\`.`,
+        `2. PROVA REAL: Executar OPTIONS e exibir os métodos permitidos retornados no header \`Allow:\` — deve bater com a evidência já capturada.`,
       ],
       devtools: `F12 → Console → fetch com método customizado.`,
-      automated: `curl -skD - -X ${f.method || 'TRACE'} "${url}" -o /dev/null`,
+      automated: `curl -skD - -X ${firstMethod} "${url}" -o /dev/null`,
       proofOfWork: `curl -skD - -X OPTIONS "${url}" -o /dev/null | grep -i "allow"`,
     };
   },
@@ -1000,6 +1020,557 @@ const VERIFICATION_MAP = {
       `2. PROVA REAL: Inspecionar a aba Issues no F12 para ver a diretiva violada.`,
     ],
     devtools: `F12 → Issues → localizar "${f.code || f.label}".`,
+  }),
+
+  // ════════════════════════════════════════════════════
+  // RECON / EXPOSIÇÃO — URL pública, curl reproduz de verdade
+  // ════════════════════════════════════════════════════
+
+  exposed_sensitive_file: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para ${f.label || 'Arquivo Sensível Exposto'}`,
+      steps: [
+        `1. Teste focado: baixar o arquivo e conferir o status HTTP.`,
+        `2. PROVA REAL: exibir os primeiros bytes — a assinatura do conteúdo (ex.: "ref: refs/" pro .git/HEAD, "KEY=" pro .env) confirma que não é uma página de erro genérica disfarçada de 200.`,
+      ],
+      devtools: `Acessar a URL diretamente numa aba anônima.`,
+      automated: `curl -skD - "${url}" -o /dev/null`,
+      proofOfWork: `curl -sk "${url}" | head -c 300`,
+    };
+  },
+
+  sitemap_disclosure: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para sitemap.xml`,
+      steps: [
+        `1. Teste focado: baixar o sitemap.xml.`,
+        `2. PROVA REAL: listar as tags <loc> — ${f.currentValue ? `já capturadas: ${String(f.currentValue).slice(0, 200)}` : 'confirmar se alguma revela área interna/sensível'}.`,
+      ],
+      devtools: `Acessar sitemap.xml no navegador.`,
+      automated: `curl -sk "${url}" | grep -o '<loc>[^<]*</loc>'`,
+      proofOfWork: `curl -sk "${url}"`,
+    };
+  },
+
+  openid_config_exposed: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para OpenID Connect Configuration Exposta`,
+      steps: [
+        `1. Teste focado: baixar o documento .well-known/openid-configuration.`,
+        `2. PROVA REAL: confirmar os endpoints revelados (authorization_endpoint, token_endpoint, etc.) — geralmente é intencional (OIDC exige isso ser público), o achado é informativo.`,
+      ],
+      devtools: `Acessar a URL diretamente.`,
+      automated: `curl -sk "${url}" | head -c 300`,
+      proofOfWork: `curl -sk "${url}"`,
+    };
+  },
+
+  http_downgrade: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Downgrade HTTP (sem redirect)`,
+      steps: [
+        `1. Teste focado: acessar a versão HTTP e ver se responde 200 (deveria redirecionar 301/302 para HTTPS).`,
+        `2. PROVA REAL: seguir o redirecionamento com -L e conferir a cadeia completa de status.`,
+      ],
+      devtools: `Digitar http:// na barra de endereço e observar se troca sozinho para https://.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP|location"`,
+      proofOfWork: `curl -skD - -L "${url}" -o /dev/null`,
+    };
+  },
+
+  auth_over_http: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Token Enviado via HTTP`,
+      steps: [
+        `1. Teste focado: confirmar que a URL da requisição é http:// (não https://).`,
+        `2. PROVA REAL: dado sensível trafegando sem TLS é confirmado só de olhar o protocolo — se a URL abaixo é http://, está confirmado.`,
+      ],
+      devtools: `F12 → Network → filtrar por http:// → conferir se algum tem header Authorization.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null`,
+    };
+  },
+
+  cache_control_sensitive: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Cache-Control em Página Autenticada`,
+      steps: [
+        `Evidência já capturada: Cache-Control atual = "${f.currentValue || '(ausente)'}".`,
+        `1. Teste focado: buscar o header Cache-Control na resposta.`,
+        `2. PROVA REAL: se não contiver "no-store", confirme no DevTools se a página fica salva no cache do disco (Network → coluna Size mostrando "(disk cache)" numa nova visita).`,
+      ],
+      devtools: `F12 → Application → Cache Storage, ou Network → coluna Size numa revisita.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -i "cache-control"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null`,
+    };
+  },
+
+  cert_self_signed: (f, targetUrl) => {
+    const hostPort = hostAndPort(f, 443, targetUrl);
+    return {
+      title: `Validação & Prova Real para Certificado Auto-Assinado`,
+      steps: [
+        `1. Teste focado: verificar se o Issuer (emissor) do certificado é igual ao Subject (mesmo nome) — isso é o que caracteriza "auto-assinado".`,
+        `2. PROVA REAL: dump completo do certificado com Issuer e Subject lado a lado.`,
+      ],
+      devtools: `F12 → Security → View certificate → comparar "Issued by" e "Issued to".`,
+      automated: `echo | openssl s_client -connect ${hostPort} 2>/dev/null | openssl x509 -issuer -subject -noout`,
+      proofOfWork: `echo | openssl s_client -connect ${hostPort} 2>/dev/null | openssl x509 -text -noout`,
+    };
+  },
+
+  insecure_websocket: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para WebSocket Sem Criptografia (ws://)`,
+      steps: [
+        `1. Teste focado: confirmar que a conexão WebSocket usa "ws://" (não "wss://") numa página HTTPS.`,
+        `2. PROVA REAL: F12 → Network → aba "WS" → conferir o protocolo da conexão e os frames trafegados em texto claro.`,
+      ],
+      devtools: `F12 → Network → filtro "WS" → clicar na conexão → aba Messages.`,
+      consoleSnippet: `new WebSocket('${url}').onerror = e => console.log('conexão ws:// bloqueada ou com erro', e)`,
+    };
+  },
+
+  missing_ptr_record: (f) => {
+    const ip = f.ip || '';
+    const reversed = ip ? ip.split('.').reverse().join('.') : '?';
+    return {
+      title: `Validação & Prova Real para Registro PTR (DNS Reverso) Ausente`,
+      steps: [
+        `1. Teste focado: consultar o PTR do IP ${ip || '(ver relatório)'}.`,
+        `2. PROVA REAL: se a consulta não retornar nome nenhum, a ausência está confirmada.`,
+      ],
+      devtools: `Terminal / CLI (nslookup / dig / PowerShell).`,
+      automated: `nslookup -type=PTR ${reversed}.in-addr.arpa`,
+      proofOfWork: `powershell -NoProfile -Command "Resolve-DnsName -Name ${ip} -Type PTR -ErrorAction SilentlyContinue"`,
+      online: ip ? `https://mxtoolbox.com/SuperTool.aspx?action=ptr%3a${ip}` : undefined,
+    };
+  },
+
+  tech_fingerprint: (f) => ({
+    title: `Validação & Prova Real para Stack Identificado por Cookie`,
+    steps: [
+      `Evidência já capturada: ${f.currentValue || f.label}.`,
+      `1. Teste focado: listar os nomes de cookie da sessão — nomes como JSESSIONID/PHPSESSID/ASP.NET_SessionId identificam a stack por convenção.`,
+      `2. PROVA REAL: cookies com esse nome confirmam a tecnologia; é informativo, não uma falha por si só.`,
+    ],
+    devtools: `F12 → Application → Cookies → conferir os nomes.`,
+    consoleSnippet: `document.cookie.split('; ').map(c => c.split('=')[0])`,
+  }),
+
+  storage_inventory: (f) => ({
+    title: `Validação & Prova Real para Inventário de ${f.storage || 'Storage'}`,
+    steps: [
+      `Evidência já capturada: ${f.note || `${(f.keys || []).length} chave(s)`}.`,
+      `1. Teste via Console: listar todas as chaves e valores agora.`,
+    ],
+    devtools: `F12 → Application → ${f.storage === 'sessionStorage' ? 'Session Storage' : 'Local Storage'}.`,
+    consoleSnippet: `console.table(Object.entries(${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}))`,
+  }),
+
+  cookie_inventory: () => ({
+    title: `Validação & Prova Real para Inventário de Cookies`,
+    steps: [
+      `1. Teste via Console: listar todos os cookies legíveis por JS agora (cookies httpOnly não aparecem aqui — é o esperado).`,
+      `2. PROVA REAL: comparar com a lista completa no DevTools (que mostra também os httpOnly).`,
+    ],
+    devtools: `F12 → Application → Cookies → domínio auditado.`,
+    consoleSnippet: `document.cookie.split('; ')`,
+  }),
+
+  console_sensitive: (f) => ({
+    title: `Validação & Prova Real para Dado Sensível no Console`,
+    steps: [
+      `Evidência já capturada ao vivo pela auditoria: "${f.currentValue || '(ver relatório)'}".`,
+      `1. Teste focado: reproduzir a ação que gera esse log e abrir o Console.`,
+      `2. PROVA REAL: se o mesmo tipo de dado (token/senha/segredo) aparecer no console, confirmado — consoles ficam expostos a qualquer extensão de navegador ou pessoa com acesso físico à máquina.`,
+    ],
+    devtools: `F12 → Console → reproduzir a ação e observar o log.`,
+  }),
+
+  auth_header_detected: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Authorization Header Detectado`,
+      steps: [
+        `Achado INFORMATIVO — não é falha por si só. Evidência: header "${f.scheme || 'Authorization'}" enviado via ${f.method || 'requisição'}.`,
+        `1. Teste focado: confirmar que a requisição só acontece sobre HTTPS e que o token não é de vida longa (revisar expiração).`,
+      ],
+      devtools: `F12 → Network → localizar a requisição → Headers → Request Headers → Authorization.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP"`,
+    };
+  },
+
+  form_get_sensitive: (f, targetUrl) => {
+    const url = sanitizeUrl(f.action, targetUrl);
+    return {
+      title: `Validação & Prova Real para Formulário GET com Dado Sensível`,
+      steps: [
+        `Evidência já capturada: campo(s) ${f.sensitiveFields?.join(', ') || '(ver relatório)'} num form method=GET.`,
+        `1. Teste focado: submeter o formulário e conferir se os valores aparecem na URL resultante/no histórico do navegador.`,
+      ],
+      devtools: `F12 → Elements → localizar o <form method="GET"> e os campos listados.`,
+      automated: url ? `curl -sk "${url}" | grep -n -C 3 -i "<form"` : undefined,
+    };
+  },
+
+  broken_access_control: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Broken Access Control`,
+      steps: [
+        `Evidência já capturada (sem estar logado): ${f.currentValue || '(ver relatório)'}.`,
+        `1. Teste focado: acessar a URL SEM cookies/sessão (aba anônima nova, sem logar).`,
+        `2. PROVA REAL: se responder 200 com conteúdo real (não a mesma página de "não encontrado" do resto do site), o acesso indevido está confirmado.`,
+      ],
+      devtools: `Aba InPrivate nova → colar a URL → conferir se pede login.`,
+      automated: `curl -skD - "${url}" -o /dev/null`,
+      proofOfWork: `curl -sk "${url}" | head -c 300`,
+    };
+  },
+
+  privilege_escalation: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Possível Escalonamento de Privilégio`,
+      steps: [
+        `Evidência já capturada: ${f.currentValue || '(ver relatório)'}.`,
+        `1. Teste focado: acessar a URL DESLOGADO (deve bloquear) e depois LOGADO com sua conta (se abrir, confirma que a rota respondeu à sua sessão).`,
+        `2. PROVA REAL: se o seu usuário NÃO deveria ter esse papel/permissão e mesmo assim a página abriu com dados reais, o escalonamento está confirmado — verificar manualmente se o papel esperado é mesmo diferente do seu.`,
+      ],
+      devtools: `F12 → Network → repita a requisição logado → aba Response.`,
+      automated: `curl -skD - "${url}" -o /dev/null`,
+    };
+  },
+
+  cors_reflected: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para CORS Refletindo Origem Arbitrária`,
+      steps: [
+        `Evidência já capturada: ${f.currentValue || '(ver relatório)'}.`,
+        `1. Teste focado: enviar um Origin forjado e conferir se o servidor o reflete de volta no Access-Control-Allow-Origin.`,
+        `2. PROVA REAL: dump completo dos headers Access-Control-* da resposta.`,
+      ],
+      devtools: `F12 → Console → fetch cross-origin de outra aba/origem e inspecionar erro/sucesso.`,
+      automated: `curl -skD - -H "Origin: https://evil-sentinela-test.example" "${url}" -o /dev/null | grep -i "access-control"`,
+      proofOfWork: `curl -skD - -H "Origin: https://evil-sentinela-test.example" "${url}" -o /dev/null`,
+    };
+  },
+
+  cross_origin_auth: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Credencial Enviada a Domínio Externo`,
+      steps: [
+        `Evidência já capturada: requisição ${f.method || ''} para "${f.targetHost || '(ver URL)'}", fora do domínio da aplicação.`,
+        ...authenticatedResponseContext(f),
+        `1. Teste focado: F12 → Network → localizar requisições para "${f.targetHost || 'o host externo'}" → conferir Request Headers (Authorization/Cookie).`,
+      ],
+      devtools: `F12 → Network → filtrar pelo host "${f.targetHost || ''}".`,
+    };
+  },
+
+  excessive_data_exposure: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Exposição Excessiva de Dados`,
+      steps: [
+        ...authenticatedResponseContext(f),
+        `1. Teste focado: repetir a chamada a essa listagem e conferir se os campos ${f.fieldsExposed?.join(', ') || 'sensíveis'} aparecem para TODOS os ${f.itemCount || 'N'} itens, mesmo os que não pertencem a você.`,
+      ],
+      devtools: `F12 → Network → localizar a resposta → aba Response → conferir os campos por item.`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
+  // CORPO DE RESPOSTA AUTENTICADA — mesma limitação dos cookies de login:
+  // curl anônimo não reproduz. Ver authenticatedResponseContext().
+  // ════════════════════════════════════════════════════
+
+  login_password_in_response: (f) => ({
+    title: `Validação & Prova Real para SENHA na Resposta de Login`,
+    steps: [
+      ...authenticatedResponseContext(f),
+      `1. Teste focado: refazer o login e inspecionar o corpo da resposta do POST — se o campo de senha aparecer em texto claro, CONFIRMADO.`,
+    ],
+    devtools: `F12 → Network → requisição de login → aba Response.`,
+  }),
+
+  login_token_in_response: (f) => ({
+    title: `Validação & Prova Real para Token "${f.tokenField || ''}" na Resposta de Login`,
+    steps: [
+      ...authenticatedResponseContext(f),
+      `1. Teste focado: refazer o login e conferir se "${f.tokenField || 'o token'}" aparece no JSON de resposta — se sim, confirme se o front-end guarda em localStorage/sessionStorage (vulnerável a XSS) ou só em memória/cookie httpOnly (mais seguro).`,
+    ],
+    devtools: `F12 → Network → requisição de login → aba Response → procurar "${f.tokenField || ''}".`,
+    consoleSnippet: `localStorage.getItem("${f.tokenField || 'accessToken'}") || sessionStorage.getItem("${f.tokenField || 'accessToken'}")`,
+  }),
+
+  login_role_in_response: (f) => ({
+    title: `Validação & Prova Real para Role/Permissão "${f.field || ''}" na Resposta de Login`,
+    steps: [
+      ...authenticatedResponseContext(f),
+      `1. Teste focado: refazer o login e localizar o campo "${f.field || ''}" no JSON — depois, tente alterar esse valor via DevTools (ex.: interceptar/reenviar) e ver se o front-end libera uma tela/botão administrativo com base nele.`,
+      `2. PROVA REAL: só é achado CONFIRMADO de verdade se o FRONT-END usar esse valor pra decidir o que mostrar sem o BACKEND validar de novo no servidor.`,
+    ],
+    devtools: `F12 → Network → requisição de login → aba Response → procurar "${f.field || ''}".`,
+  }),
+
+  password_in_response: (f) => ({
+    title: `Validação & Prova Real para Senha Retornada por API`,
+    steps: [
+      ...authenticatedResponseContext(f),
+      `1. Teste focado: repetir a chamada que gerou esse achado e inspecionar o corpo — se a senha (ou hash) aparecer, CONFIRMADO. NUNCA deveria acontecer, mesmo hasheada.`,
+    ],
+    devtools: `F12 → Network → localizar a resposta → aba Response.`,
+  }),
+
+  token_in_non_auth_response: (f) => ({
+    title: `Validação & Prova Real para Token em Endpoint Não-Auth`,
+    steps: [
+      ...authenticatedResponseContext(f),
+      `1. Teste focado: confirmar que a URL abaixo NÃO é um endpoint de login/refresh, e mesmo assim o corpo retorna um token.`,
+    ],
+    devtools: `F12 → Network → localizar a resposta → aba Response.`,
+  }),
+
+  sensitive_in_body: (f, targetUrl) => ({
+    title: `Validação & Prova Real para Dado Sensível no Corpo da Requisição`,
+    steps: [
+      `Achado INFORMATIVO — esperado em login/cadastro. Evidência: ${f.note || f.label}.`,
+      `1. Teste focado: confirmar que a requisição (método ${f.method || 'POST'}) só acontece sobre HTTPS.`,
+    ],
+    devtools: `F12 → Network → localizar a requisição → aba Payload/Request.`,
+  }),
+
+  sensitive_in_url: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Dado Sensível na URL`,
+      steps: [
+        `1. Teste focado: a própria URL abaixo já contém o parâmetro sensível — confirme visualmente.`,
+        `2. PROVA REAL: URLs com dado sensível ficam em browser history, logs de servidor/proxy e no header Referer enviado a terceiros — risco real independente de HTTPS.`,
+      ],
+      devtools: `F12 → Network → conferir a URL completa da requisição (método ${f.method || 'GET'}).`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP"`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
+  // FORMULÁRIO DE LOGIN — observações de atributo, sem URL própria (a
+  // evidência é o HTML/DOM da própria página de login já auditada).
+  // ════════════════════════════════════════════════════
+
+  login_form_action: (f, targetUrl) => {
+    const url = sanitizeUrl(f.formAction, targetUrl);
+    return {
+      title: `Inventário: Action do Formulário de Login`,
+      steps: [
+        `Achado INFORMATIVO. Capturado ao vivo: ${f.note || `envia para ${f.formAction} via ${f.formMethod || 'POST'}`}.`,
+      ],
+      devtools: `F12 → Elements → localizar <form> → atributo action.`,
+      automated: url ? `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP"` : undefined,
+    };
+  },
+
+  login_no_form_tag: (f, targetUrl) => ({
+    title: `Validação & Prova Real para Login Sem Tag <form>`,
+    steps: [
+      `1. Teste focado: confirmar que não existe <form> na página, mas há campo de senha (login via JS/fetch, comum em SPA).`,
+      `2. PROVA REAL: F12 → Network → digitar credenciais de teste e observar qual requisição JS dispara o login.`,
+    ],
+    devtools: `F12 → Elements → Ctrl+F → buscar "<form" (deve dar 0 resultados) e "type=\\"password\\"".`,
+  }),
+
+  login_password_no_name: (f) => ({
+    title: `Validação & Prova Real para Campo de Senha Sem name/id`,
+    steps: [
+      `1. Teste focado: inspecionar o <input type="password"> e conferir os atributos name e id.`,
+    ],
+    devtools: `F12 → Elements → clicar no campo de senha → aba Attributes.`,
+    consoleSnippet: `Array.from(document.querySelectorAll('input[type="password"]')).map(i => ({ name: i.name || '(ausente)', id: i.id || '(ausente)' }))`,
+  }),
+
+  login_password_autocomplete: (f) => ({
+    title: `Validação & Prova Real para Autocomplete no Campo de Senha`,
+    steps: [
+      `Evidência já capturada: campo "${f.inputName || ''}" com autocomplete="${f.autocompleteValue || '(não definido)'}".`,
+      `1. Teste focado: inspecionar o atributo autocomplete do campo agora.`,
+    ],
+    devtools: `F12 → Elements → localizar o campo "${f.inputName || ''}" → atributo autocomplete.`,
+    consoleSnippet: `document.querySelector('input[name="${f.inputName || ''}"], input[id="${f.inputName || ''}"]')?.autocomplete`,
+  }),
+
+  login_password_example_placeholder: (f) => ({
+    title: `Validação & Prova Real para Placeholder com Exemplo de Senha Fraca`,
+    steps: [
+      `Evidência já capturada: placeholder = "${f.placeholder || ''}".`,
+      `1. Teste focado: inspecionar o atributo placeholder do campo de senha.`,
+    ],
+    devtools: `F12 → Elements → localizar o campo de senha → atributo placeholder.`,
+    consoleSnippet: `Array.from(document.querySelectorAll('input[type="password"]')).map(i => i.placeholder)`,
+  }),
+
+  login_password_maxlength: (f) => ({
+    title: `Validação & Prova Real para maxlength Curto no Campo de Senha`,
+    steps: [
+      `1. Teste focado: inspecionar o atributo maxlength do campo de senha — evidência já no título do achado (${f.label || ''}).`,
+    ],
+    devtools: `F12 → Elements → localizar o campo de senha → atributo maxlength.`,
+    consoleSnippet: `Array.from(document.querySelectorAll('input[type="password"]')).map(i => i.maxLength)`,
+  }),
+
+  login_password_visible: (f) => ({
+    title: `Validação & Prova Real para Campo de Senha Visível (type="text")`,
+    steps: [
+      `Evidência já capturada: campo "${f.inputName || ''}" com type diferente de "password".`,
+      `1. Teste focado: inspecionar o atributo type do campo — se não for "password", a senha fica visível na tela.`,
+    ],
+    devtools: `F12 → Elements → localizar o campo "${f.inputName || ''}" → atributo type.`,
+    consoleSnippet: `document.querySelector('input[name="${f.inputName || ''}"], input[id="${f.inputName || ''}"]')?.type`,
+  }),
+
+  login_forgot_password_http: (f) => ({
+    title: `Validação & Prova Real para Link de Recuperação de Senha via HTTP`,
+    steps: [
+      `Evidência já capturada: link = "${f.href || ''}".`,
+      `1. Teste focado: confirmar que o link começa com "http://", não "https://".`,
+    ],
+    devtools: `F12 → Elements → localizar o link "Esqueci minha senha" → atributo href.`,
+    automated: f.href ? `curl -skD - "${f.href}" -o /dev/null | grep -iE "^HTTP"` : undefined,
+  }),
+
+  // ════════════════════════════════════════════════════
+  // FLUXO DE LOGIN AO VIVO — precisa refazer o login pra reproduzir
+  // ════════════════════════════════════════════════════
+
+  login_credentials_sent: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Transporte de Credenciais no Login`,
+      steps: [
+        `1. Teste focado: confirmar que a URL da requisição de login é https:// (evidência: ${f.label || ''}).`,
+      ],
+      devtools: `F12 → Network → requisição de login → conferir o protocolo.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -iE "^HTTP"`,
+    };
+  },
+
+  login_password_in_url: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Senha na URL de Login`,
+      steps: [
+        `1. Teste focado: refazer o login e conferir se a URL da requisição contém a senha na query string.`,
+        `2. PROVA REAL: F12 → Network → clicar na requisição de login → aba Headers → General → Request URL.`,
+      ],
+      devtools: `F12 → Network → requisição de login → Request URL.`,
+    };
+  },
+
+  login_redirect_with_token: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Redirect de Login com Token na URL`,
+      steps: [
+        `Evidência já capturada: redirecionou para "${f.redirectTo || '(ver relatório)'}".`,
+        `1. Teste focado: refazer o login e conferir o header Location da resposta de redirect.`,
+      ],
+      devtools: `F12 → Network → resposta 3xx do login → Headers → Location.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -i "location"`,
+    };
+  },
+
+  login_cookie_added: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Cookie "${f.cookieName}" Criado no Login`,
+      steps: [
+        ...cookieCaptureContext(f),
+        `1. Teste via Console: ler o cookie "${f.cookieName}" agora (após logar).`,
+      ],
+      devtools: `F12 → Application → Cookies → linha "${f.cookieName}".`,
+      consoleSnippet: `document.cookie.split('; ').filter(c => c.startsWith('${f.cookieName}='))`,
+    };
+  },
+
+  login_cookie_removed: (f) => ({
+    title: `Validação & Prova Real para Cookie "${f.cookieName}" Removido no Login`,
+    steps: [
+      `1. Teste via Console: o cookie "${f.cookieName}" NÃO deve mais existir após o login (comum quando o servidor regenera a sessão corretamente — geralmente é um sinal BOM, não uma falha).`,
+    ],
+    devtools: `F12 → Application → Cookies → confirmar ausência de "${f.cookieName}".`,
+    consoleSnippet: `document.cookie.split('; ').filter(c => c.startsWith('${f.cookieName}=')).length === 0`,
+  }),
+
+  pii_in_storage_value: (f) => ({
+    title: `Validação & Prova Real para Documento Pessoal em ${f.storeType || 'Storage'}`,
+    steps: [
+      `1. Teste via Console: ler a chave "${f.key}" — se contiver um CPF/CNPJ com dígito verificador válido em texto claro, confirmado.`,
+    ],
+    devtools: `F12 → Application → ${f.storeType === 'sessionStorage' ? 'Session Storage' : 'Local Storage'} → linha "${f.key}".`,
+    consoleSnippet: `${f.storeType === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}")`,
+  }),
+
+  pii_in_url_value: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Documento Pessoal na URL`,
+      steps: [
+        `1. Teste focado: o próprio parâmetro "${f.paramKey || ''}" na URL abaixo já é a evidência — confirmar visualmente o dígito verificador do documento.`,
+        `2. PROVA REAL: URLs com CPF/CNPJ ficam em browser history, logs de servidor/proxy — risco de exposição de PII (LGPD Art. 46).`,
+      ],
+      devtools: `F12 → Console → window.location.search.`,
+      consoleSnippet: `new URLSearchParams(window.location.search).get('${f.paramKey || ''}')`,
+    };
+  },
+
+  target_blank_noopener: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para target="_blank" Sem rel="noopener"`,
+      steps: [
+        `Evidência já capturada: ${(f.sample || []).slice(0, 3).join(', ') || f.label}.`,
+        `1. Teste focado: listar os links target="_blank" e conferir o atributo rel.`,
+        `2. PROVA REAL: navegadores modernos já mitigam por padrão (noopener implícito), mas confirmar explicitamente reduz risco em navegadores antigos/embarcados.`,
+      ],
+      devtools: `F12 → Elements → Ctrl+F → buscar 'target="_blank"'.`,
+      consoleSnippet: `Array.from(document.querySelectorAll('a[target="_blank"]')).filter(a => !/noopener/.test(a.rel)).map(a => a.href)`,
+      automated: url ? `curl -sk "${url}" | grep -oE '<a[^>]*target="_blank"[^>]*>'` : undefined,
+    };
+  },
+
+  source_map_exposed: (f, targetUrl) => {
+    const mapUrl = sanitizeUrl(f.mapUrl || f.match, targetUrl);
+    return {
+      title: `Validação & Prova Real para Referência a Source Map`,
+      steps: [
+        `1. Teste focado: confirmar que o script referencia um .map externo (evidência: "${f.match || f.mapUrl || ''}").`,
+        `2. PROVA REAL: tentar baixar o .map — se responder 200, use o achado "source_map_content_exposed" (gerado automaticamente quando acessível) para ver se o conteúdo original vazou.`,
+      ],
+      devtools: `F12 → Sources → o DevTools já resolve o .map automaticamente se acessível.`,
+      automated: `curl -skD - "${mapUrl}" -o /dev/null | grep -iE "^HTTP"`,
+      proofOfWork: `curl -sk "${mapUrl}" | head -c 200`,
+    };
+  },
+
+  cloud_bucket_detected: (f, targetUrl) => ({
+    title: `Validação & Prova Real para Bucket de Nuvem Referenciado (não testado)`,
+    steps: [
+      `Achado é INVENTÁRIO — bucket(s) referenciado(s): ${(f.buckets || []).join(', ') || f.currentValue || '(ver relatório)'}. O Sentinela NÃO testou a permissão.`,
+      `1. Teste focado: tentar listar o bucket publicamente.`,
+    ],
+    devtools: `Abrir a URL do bucket direto no navegador.`,
+    automated: (f.buckets || [])[0] ? `curl -sk "https://${(f.buckets || [])[0]}?list-type=2"` : undefined,
+    online: `https://github.com/sa7mon/S3Scanner`,
   }),
 };
 

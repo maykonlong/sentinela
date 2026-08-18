@@ -21,7 +21,7 @@ import chalk from 'chalk';
 
 import { analyzeStorage, analyzeCookies } from './rules/storage-rules.mjs';
 import { analyzeSourceCode, analyzeInlineScripts, fetchAndAnalyzeSourceMap } from './rules/code-rules.mjs';
-import { analyzeHeaders, analyzeProtocol } from './rules/header-rules.mjs';
+import { analyzeHeaders, analyzeProtocol, detectDuplicateHeaders } from './rules/header-rules.mjs';
 import { analyzeRequest, analyzeResponse } from './rules/network-rules.mjs';
 import { classifyResource, isMinified, sameRegistrableDomain } from './rules/context-rules.mjs';
 import { detectLibraries, detectAllLibraryVersions, checkOsvVulnerabilities } from './rules/library-rules.mjs';
@@ -499,6 +499,10 @@ async function auditLoginPage(page, url) {
             severity: 'CRITICAL',
             phase: 'PRÉ-LOGIN',
             label: 'Login enviado via HTTP (sem criptografia)',
+            // Sem isso o achado não tinha URL nenhuma — impossível de
+            // reproduzir depois (a checagem manual cairia na página HTTPS
+            // errada, nunca na action http:// real que gerou o achado).
+            url: action,
             risk: 'Credenciais de login são enviadas sem criptografia! Qualquer pessoa na mesma rede (WiFi, ISP) pode interceptar usuário e senha em texto puro.',
             recommendation: 'URGENTE: Usar HTTPS. Obter certificado TLS (Let\'s Encrypt é gratuito).',
             attackExample: 'Atacante na mesma WiFi usa Wireshark e vê: POST /login HTTP/1.1 → user=admin&password=SenhaSecreta',
@@ -1670,6 +1674,15 @@ async function main() {
         if (/text\/html/i.test(contentType) && status >= 200 && status < 300 &&
             response.request().resourceType() === 'document') {
           documentHeaders.set(url.split('#')[0], response.headers());
+          // headers() colapsa duplicatas — headersArray() preserva cada
+          // ocorrência. Só assim dá pra detectar duas camadas de proxy
+          // mandando o mesmo header de segurança com valores diferentes.
+          const dupFindings = detectDuplicateHeaders(await response.headersArray(), url);
+          if (dupFindings.length > 0) {
+            console.log(chalk.yellow(`  ⚠️  ${dupFindings.length} header(s) duplicado(s)/conflitante(s)`));
+            dupFindings.forEach(logFinding);
+            allFindings.push(...dupFindings.map(f => ({ ...f, phase: phaseTag() })));
+          }
         }
       } catch { /* ignore */ }
 

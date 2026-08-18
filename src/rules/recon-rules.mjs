@@ -259,7 +259,8 @@ export async function runRecon(request, pageOrigin, opts = {}) {
   }
 
   // 7) Página de erro verbosa — path improvável → stack trace / tecnologia
-  const errRes = await safeGet(request, pageOrigin + '/sentinela-probe-nao-existe-9182734.aspx');
+  const probePath = '/sentinela-probe-nao-existe-9182734.aspx';
+  const errRes = await safeGet(request, pageOrigin + probePath);
   if (errRes && errRes.body) {
     const hit = STACK_PATTERNS.find(re => re.test(errRes.body));
     if (hit) {
@@ -267,7 +268,9 @@ export async function runRecon(request, pageOrigin, opts = {}) {
       findings.push({
         type: 'verbose_error', severity: 'MEDIUM', thirdParty: false,
         label: 'Página de erro vaza stack trace / tecnologia',
-        url: pageOrigin + '/(path inexistente)',
+        // URL real e reproduzível — antes era um placeholder de exibição
+        // ("/(path inexistente)"), impossível de testar de novo.
+        url: pageOrigin + probePath,
         currentValue: snippet,
         risk: 'A aplicação retorna erros detalhados (stack trace, versão do framework, caminho de arquivos, erro de SQL). Isso entrega informação de infraestrutura e às vezes indica injeção.',
         recommendation: 'Em produção, usar páginas de erro genéricas (sem stack trace) e logar os detalhes só no servidor.',

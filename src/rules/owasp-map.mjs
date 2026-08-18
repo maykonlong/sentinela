@@ -65,6 +65,7 @@ const MAP = {
   source_map_internal_routes: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
   cookie_missing_secure_prefix: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1004', confidence: 'provável' },
   cache_control_sensitive:    { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-525', confidence: 'confirmado' },
+  duplicate_security_header:  { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-436', confidence: 'confirmado' },
   target_blank_noopener:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1022', confidence: 'confirmado' },
   http_method_enabled:        { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-650', confidence: 'confirmado' },
   exposed_sensitive_file:     { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-538', confidence: 'confirmado' },

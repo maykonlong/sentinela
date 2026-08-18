@@ -348,6 +348,54 @@ const DANGEROUS_HEADERS = [
   },
 ];
 
+// Nomes de headers de segurança onde duplicidade/conflito importa. Fora
+// dessa lista (ex.: Vary, Access-Control-Allow-Methods) é comum e inofensivo
+// ter múltiplas camadas de proxy adicionando o mesmo header sem problema.
+const DUPLICATE_SENSITIVE_HEADERS = new Set(SECURITY_HEADERS.map(h => h.name.toLowerCase()));
+
+/**
+ * Detecta o mesmo header de segurança aparecendo MAIS DE UMA VEZ na resposta
+ * com valores DIFERENTES — sinal de duas camadas de proxy/CDN cada uma
+ * adicionando seu próprio conjunto de headers sem remover o da outra.
+ *
+ * IMPORTANTE: `response.headers()` do Playwright já colapsa duplicatas num
+ * objeto plano (uma chave só pode ter um valor) — a essa altura a informação
+ * de duplicidade JÁ SE PERDEU. Só dá pra detectar isso com `headersArray()`,
+ * que preserva cada ocorrência (documentado no próprio Playwright: "Headers
+ * with multiple entries... appear in the array multiple times").
+ *
+ * @param {Array<{name:string, value:string}>} headersArray - de response.headersArray()
+ */
+export function detectDuplicateHeaders(headersArray, url) {
+  const findings = [];
+  if (!Array.isArray(headersArray)) return findings;
+
+  const byName = new Map();
+  for (const { name, value } of headersArray) {
+    const key = String(name || '').toLowerCase();
+    if (!DUPLICATE_SENSITIVE_HEADERS.has(key)) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(value);
+  }
+
+  for (const [name, values] of byName) {
+    const distinct = [...new Set(values)];
+    if (distinct.length < 2) continue; // só 1 valor (ou repetido igual) = normal
+    findings.push({
+      type: 'duplicate_security_header',
+      severity: 'MEDIUM',
+      thirdParty: false,
+      label: `Header "${name}" duplicado com valores conflitantes`,
+      header: name,
+      url,
+      currentValue: distinct.map((v, i) => `[${i + 1}] ${v}`).join('  '),
+      risk: `O header "${name}" foi enviado ${values.length}x na mesma resposta, com valores DIFERENTES entre si. Isso normalmente indica duas camadas de proxy/CDN cada uma adicionando seu próprio conjunto de headers de segurança sem remover o da outra. O comportamento do navegador diante de headers duplicados e conflitantes não é bem definido para todos os headers — pode não aplicar nenhum dos dois como esperado, ou aplicar um valor mais fraco do que os dois individualmente pretendiam.`,
+      recommendation: `Configurar o header "${name}" em APENAS UMA camada da infraestrutura (app OU proxy/CDN, não os dois) para eliminar a ambiguidade.`,
+    });
+  }
+  return findings;
+}
+
 /**
  * Analisa headers HTTP de segurança de uma response
  */
