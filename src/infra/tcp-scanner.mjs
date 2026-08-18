@@ -8,7 +8,17 @@
  * Estratégia anti-falso-positivo:
  * - Timeout 1200ms (evita FILTERED virar OPEN em redes lentas)
  * - Dupla confirmação: porta detectada como OPEN é checada uma segunda vez
- * - Latência < 2ms em conexão bem-sucedida pode indicar RST imediato (falso OPEN) → marcada UNCERTAIN
+ * - "Não consegui testar" NUNCA vira CLOSED: erros de rede/recurso viram UNKNOWN
+ *   e ficam fora do relatório (contabilizados como não verificados).
+ *
+ * NOTA sobre latência (regra removida): a versão antiga marcava como UNCERTAIN
+ * qualquer conexão com latência < 3ms, supondo "RST imediato = falso OPEN".
+ * A premissa é tecnicamente errada: um RST dispara o evento 'error'
+ * (ECONNREFUSED), nunca 'connect'. Receber 'connect' significa handshake TCP
+ * completo, ou seja, porta genuinamente aberta. Em LAN (ex.: alvo 10.4.0.20,
+ * RTT sub-milissegundo) TODA porta aberta caía nessa regra nas duas passadas e
+ * era reclassificada como CLOSED — o scanner reportava a própria porta 8443 do
+ * app como fechada, com hasWebPort=false e status 'FAIL'.
  */
 
 import net from 'net';
@@ -51,9 +61,16 @@ const DANGEROUS_PORTS = new Set([
   21, 22, 23, 3389, 8888,
 ]);
 
+// Erros que provam que a porta está fechada (a pilha TCP do alvo respondeu).
+// Qualquer outro erro significa "não consegui testar", não "porta fechada".
+const CLOSED_ERR_CODES = new Set(['ECONNREFUSED', 'ECONNRESET']);
+
 /**
- * Tenta conectar a uma porta. Retorna OPEN, CLOSED ou FILTERED.
- * Latência < 3ms pode indicar RST imediato (falso positivo) — marcado UNCERTAIN.
+ * Tenta conectar a uma porta. Retorna OPEN, CLOSED, FILTERED ou UNKNOWN.
+ * - OPEN     = handshake TCP completo (evento 'connect')
+ * - CLOSED   = alvo respondeu recusando (ECONNREFUSED/ECONNRESET)
+ * - FILTERED = timeout sem resposta
+ * - UNKNOWN  = não foi possível testar (rota/permissão/recurso local)
  */
 function checkPort(host, port, timeout = 1200) {
   return new Promise((resolve) => {
@@ -75,10 +92,9 @@ function checkPort(host, port, timeout = 1200) {
       // Esperar brevemente (250ms) por banner espontâneo
       setTimeout(() => {
         sock.destroy();
-        const state = (latency < 3 && !['127.0.0.1', '::1', 'localhost'].includes(host))
-          ? 'UNCERTAIN'
-          : 'OPEN';
-        resolve({ port, service, state, latency_ms: latency, banner: banner ? banner.substring(0, 120) : null });
+        // Handshake completo = OPEN, independente da latência. Não há mais
+        // downgrade por latência baixa (ver nota no cabeçalho do arquivo).
+        resolve({ port, service, state: 'OPEN', latency_ms: latency, banner: banner ? banner.substring(0, 120) : null });
       }, 250);
     });
 
@@ -91,9 +107,13 @@ function checkPort(host, port, timeout = 1200) {
     sock.on('error', (err) => {
       const latency = Date.now() - start;
       sock.destroy();
-      // ECONNREFUSED = porta fechada com resposta RST (definitivamente CLOSED)
-      // Outros erros (EHOSTUNREACH, ENETUNREACH) = também CLOSED/inacessível
-      resolve({ port, service, state: 'CLOSED', latency_ms: latency, errCode: err.code });
+      // Só ECONNREFUSED/ECONNRESET provam porta fechada: o host respondeu RST.
+      // EHOSTUNREACH/ENETUNREACH/EACCES/EMFILE/ENFILE/EADDRNOTAVAIL são falhas do
+      // nosso lado ou da rota — antes viravam CLOSED, ou seja, "não consegui
+      // testar" era relatado como "porta fechada" (e, somado ao bug de latência,
+      // fazia o alvo inteiro virar status FAIL sem nenhum teste válido).
+      const state = CLOSED_ERR_CODES.has(err.code) ? 'CLOSED' : 'UNKNOWN';
+      resolve({ port, service, state, latency_ms: latency, errCode: err.code });
     });
 
     sock.connect(port, host);
@@ -101,16 +121,35 @@ function checkPort(host, port, timeout = 1200) {
 }
 
 /**
- * Dupla confirmação para portas marcadas como OPEN ou UNCERTAIN.
- * Se a segunda tentativa falhar, reclassifica como CLOSED.
+ * Dupla confirmação para portas detectadas como OPEN na primeira passada.
+ *
+ * A primeira passada já provou o handshake TCP; a segunda serve apenas para
+ * reforçar (confirmed=true), NUNCA para apagar a evidência. Antes, qualquer
+ * segunda tentativa não-OPEN reclassificava a porta como CLOSED — bastava um
+ * timeout, um rate-limit do serviço ou um restart momentâneo para o app sumir
+ * do relatório (e, com a antiga regra de latência, isso acontecia em 100% das
+ * portas em rede local).
  */
 async function confirmPort(host, port, firstLatency) {
   const result = await checkPort(host, port, 1200);
   if (result.state === 'OPEN') {
-    return { state: 'OPEN', latency_ms: Math.round((firstLatency + result.latency_ms) / 2) };
+    return {
+      state: 'OPEN',
+      latency_ms: Math.round((firstLatency + result.latency_ms) / 2),
+      confirmed: true,
+      inconsistent: false,
+    };
   }
-  // Segunda tentativa falhou → falso positivo
-  return { state: 'CLOSED', latency_ms: result.latency_ms };
+  // Divergência entre as passadas: mantemos OPEN (o handshake aconteceu de
+  // fato), mas sinalizamos que a confirmação não fechou.
+  return {
+    state: 'OPEN',
+    latency_ms: firstLatency,
+    confirmed: false,
+    inconsistent: true,
+    secondPassState: result.state,
+    secondPassErr: result.errCode || null,
+  };
 }
 
 /**
@@ -191,8 +230,8 @@ export async function scanTcpPorts(host, customPorts) {
     portsToCheck.map(port => checkPort(host, port))
   );
 
-  // Segunda rodada — confirmar apenas as candidatas a OPEN/UNCERTAIN
-  const candidates = firstPass.filter(r => r.state === 'OPEN' || r.state === 'UNCERTAIN');
+  // Segunda rodada — reforçar apenas as portas que completaram handshake
+  const candidates = firstPass.filter(r => r.state === 'OPEN');
   const confirmations = {};
   if (candidates.length > 0) {
     await Promise.all(candidates.map(async r => {
@@ -203,20 +242,15 @@ export async function scanTcpPorts(host, customPorts) {
 
   // Montar resultados finais com dupla confirmação e conselho de segurança aplicado
   const results = firstPass.map(r => {
-    let finalState = r.state;
-    let finalLatency = r.latency_ms;
-    let isConfirmed = false;
-    if (confirmations[r.port]) {
-      finalState = confirmations[r.port].state;
-      finalLatency = confirmations[r.port].latency_ms;
-      isConfirmed = true;
-    }
+    const conf = confirmations[r.port];
     const advice = getPortSecurityAdvice(r.port, r.service);
     return {
       ...r,
-      state: finalState,
-      latency_ms: finalLatency,
-      confirmed: isConfirmed,
+      state: conf ? conf.state : r.state,
+      latency_ms: conf ? conf.latency_ms : r.latency_ms,
+      confirmed: conf ? conf.confirmed : false,
+      inconsistent: conf ? conf.inconsistent : false,
+      second_pass_state: conf ? (conf.secondPassState || null) : null,
       severity: advice.severity,
       risk: advice.risk,
       recommendation: advice.recommendation,
@@ -224,6 +258,8 @@ export async function scanTcpPorts(host, customPorts) {
   });
 
   const openPorts = results.filter(r => r.state === 'OPEN');
+  // Portas que não puderam ser testadas: não entram como aberta nem como fechada.
+  const unknownPorts = results.filter(r => r.state === 'UNKNOWN');
   const hasWebPort = results.some(r =>
     [80, 443, 8080, 8443].includes(r.port) && r.state === 'OPEN'
   );
@@ -249,10 +285,26 @@ export async function scanTcpPorts(host, customPorts) {
     });
   }
 
+  // Se NENHUMA porta deu resposta conclusiva (tudo UNKNOWN ou FILTERED), o
+  // resultado é indeterminado — 'FAIL' aqui afirmaria "nenhuma porta aberta"
+  // com base apenas em timeouts e erros locais.
+  const verifiedCount = results.filter(r => r.state === 'OPEN' || r.state === 'CLOSED').length;
+  let status;
+  if (hasWebPort) status = 'PASS';
+  else if (openPorts.length > 0) status = 'WARN';
+  else if (verifiedCount === 0) status = 'INFO';
+  else status = 'FAIL';
+
   return {
-    status: hasWebPort ? 'PASS' : (openPorts.length > 0 ? 'WARN' : 'FAIL'),
+    status,
     total_scanned: results.length,
+    verified_count: verifiedCount,
     open_count: openPorts.length,
+    unverified_count: unknownPorts.length,
+    unverified_ports: unknownPorts.map(r => ({ port: r.port, errCode: r.errCode || null })),
+    note: unknownPorts.length > 0
+      ? `${unknownPorts.length} porta(s) não puderam ser testadas (erro de rota/recurso local) — estado indeterminado, não contabilizadas como abertas nem fechadas.`
+      : null,
     ports: results,
     findings,
   };

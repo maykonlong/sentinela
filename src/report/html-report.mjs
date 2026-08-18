@@ -16,6 +16,8 @@
  *  - Apêndice com metodologia, glossário e aviso legal
  */
 
+import { titleOf, reachOf, dnsRecordState, reputationState, portConfidence, tcpScanNotice } from './labels.mjs';
+
 function esc(s) {
   if (s == null) return '';
   return String(s)
@@ -42,6 +44,12 @@ const SEV_EMOJI = {
   INFO:     'ℹ️',
 };
 
+// Cor por nota, usada só se `scoreBreakdown.gradeColor` não vier (o módulo de
+// score é de outro dono e pode mudar de forma; não queremos acoplar a ele).
+const GRADE_FALLBACK_COLOR = {
+  A: '#2f9e44', B: '#37b24d', C: '#f08c00', D: '#e8590c', F: '#c92a2a',
+};
+
 /**
  * Gera o HTML empresarial standalone do relatório.
  */
@@ -50,10 +58,15 @@ export function generateEnterpriseHtml({
   scoreBreakdown, infraData, screenshots, timeline, testArtifacts,
   regression, counts, evidenceOf,
 }) {
-  const score = scoreBreakdown.totalScore;
-  const grade = scoreBreakdown.grade;
-  const gradeLabel = scoreBreakdown.gradeLabel;
-  const gradeColor = scoreBreakdown.gradeColor;
+  // Leitura defensiva: computeScoreBreakdown está sendo redesenhado e pode
+  // ganhar campos novos. Só dependemos de totalScore/grade/gradeLabel, e
+  // toleramos a ausência de gradeColor/categories sem quebrar o relatório.
+  const sb = scoreBreakdown || {};
+  const score = sb.totalScore ?? 0;
+  const grade = sb.grade ?? '—';
+  const gradeLabel = sb.gradeLabel ?? '';
+  const gradeColor = sb.gradeColor || GRADE_FALLBACK_COLOR[grade] || '#868e96';
+  const scoreCategories = Array.isArray(sb.categories) ? sb.categories : [];
 
   const card = (label, val, color) => `
     <div class="card">
@@ -176,7 +189,19 @@ export function generateEnterpriseHtml({
     
     /* ── Código ── */
     .code-block-wrapper { position: relative; margin: 10px 0; }
-    .code-block { background: #1a1b1e; color: #c1c2c5; border-radius: 8px; padding: 14px 16px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; overflow-x: auto; white-space: pre; line-height: 1.6; }
+    .code-block { background: #1a1b1e; color: #c1c2c5; border-radius: 8px; padding: 14px 16px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; overflow-x: auto; white-space: pre; line-height: 1.6; margin: 0; }
+
+    /* ── Alcance (occurrences do dedup) ── */
+    .freach { font-size: 12px; color: #495057; background: #f1f3f5; border-radius: 6px; padding: 6px 10px; margin: 6px 0; }
+    .freach summary { cursor: pointer; font-weight: 600; color: #1c7ed6; }
+    .freach ul { margin: 6px 0 0; padding-left: 18px; max-height: 220px; overflow-y: auto; }
+    .freach li { margin: 2px 0; } .freach code { font-size: 11px; word-break: break-all; }
+
+    /* ── Caixa única "como ler as provas" (antes repetida em cada achado) ── */
+    .proof-legend { background: #f8f9fa; border: 1px solid #dee2e6; border-left: 4px solid #1c7ed6; border-radius: 8px; padding: 12px 14px; margin: 0 0 14px; font-size: 12px; color: #343a40; }
+    .proof-legend .pl-title { font-weight: 700; color: #1c7ed6; margin-bottom: 6px; }
+    .proof-legend .pl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-top: 8px; }
+    .proof-hint { font-size: 11px; color: #868e96; margin-top: 8px; }
     
     /* ── Nota / Alerta ── */
     .note { background: #fff3bf; border: 1px solid #ffe066; border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #664d03; margin: 16px 0; }
@@ -219,7 +244,10 @@ export function generateEnterpriseHtml({
     
     ${topRisks.length > 0 ? `
     <h3>Top Riscos</h3>
-    <ol>${topRisks.map(f => `<li><strong>[${f.severity}]</strong> ${esc(f.label || f.type)}${f.risk ? ` — ${esc(f.risk.substring(0, 120))}${f.risk.length > 120 ? '…' : ''}` : ''}</li>`).join('')}</ol>
+    <ol>${topRisks.map(f => {
+      const reach = reachOf(f);
+      return `<li><strong>[${f.severity}]</strong> ${esc(titleOf(f))}${reach ? ` <span style="color:#868e96;font-weight:600">(${esc(reach.text)})</span>` : ''}${f.risk ? ` — ${esc(f.risk.substring(0, 120))}${f.risk.length > 120 ? '…' : ''}` : ''}</li>`;
+    }).join('')}</ol>
     ` : '<p style="color:#2f9e44">✅ Nenhum problema crítico ou alto encontrado.</p>'}
     
     <h3>⚡ Matriz de Esforço × Impacto (Plano de Ação)</h3>
@@ -269,23 +297,39 @@ export function generateEnterpriseHtml({
   </div>`;
 
   // ── Score Breakdown ──
-  const breakdownHtml = `
+  const breakdownHtml = scoreCategories.length ? `
   <div class="section">
     <h2>📈 Score por Categoria</h2>
     <div class="breakdown-grid">
-      ${scoreBreakdown.categories.map(cat => {
-        const fillColor = cat.pct >= 80 ? '#2f9e44' : cat.pct >= 50 ? '#f08c00' : '#c92a2a';
+      ${scoreCategories.map(cat => {
+        // `pct` é derivável de earnedPts/maxPts — se a nova versão do módulo de
+        // score parar de mandá-lo, recalculamos em vez de imprimir NaN%.
+        const pct = Number.isFinite(cat.pct)
+          ? cat.pct
+          : (cat.maxPts > 0 ? Math.round((cat.earnedPts ?? 0) / cat.maxPts * 100) : 100);
+        // Categoria não avaliada (o scan correspondente não rodou) NÃO pode
+        // aparecer como "✅ Nenhum problema" — seria afirmar ausência de risco
+        // sem ter olhado. `undefined` = módulo antigo, que sempre avaliava.
+        const notEvaluated = cat.evaluated === false;
+        const fillColor = notEvaluated ? '#ced4da' : pct >= 80 ? '#2f9e44' : pct >= 50 ? '#f08c00' : '#c92a2a';
+        const detail = notEvaluated
+          ? '❔ Não avaliado (fora do escopo desta sessão)'
+          : cat.issueCount > 0
+            ? `${cat.issueCount} achado(s)${cat.occurrenceTotal > cat.issueCount ? ` · ${cat.occurrenceTotal} ocorrência(s)` : ''} · ${cat.deduction}pts`
+            : '✅ Nenhum problema';
         return `<div class="cat-bar">
           <div class="cat-head">
             <span class="cat-name">${esc(cat.label)}</span>
-            <span class="cat-score" style="color:${fillColor}">${cat.earnedPts}/${cat.maxPts}</span>
+            <span class="cat-score" style="color:${notEvaluated ? '#868e96' : fillColor}">${notEvaluated ? '—' : `${cat.earnedPts}/${cat.maxPts}`}</span>
           </div>
-          <div class="bar-bg"><div class="bar-fill" style="width:${cat.pct}%;background:${fillColor}"></div></div>
-          <div class="cat-detail">${cat.issueCount > 0 ? `${cat.issueCount} achado(s) · ${cat.deduction}pts` : '✅ Nenhum problema'}</div>
+          <div class="bar-bg"><div class="bar-fill" style="width:${notEvaluated ? 0 : Math.max(0, Math.min(100, pct))}%;background:${fillColor}"></div></div>
+          <div class="cat-detail">${detail}</div>
         </div>`;
       }).join('')}
     </div>
-  </div>`;
+    ${sb.gradeCap && sb.gradeCap.applied ? `<p style="font-size:12px;color:#e8590c;margin-top:12px">⚠️ <b>Nota limitada a ${esc(sb.gradeCap.maxGrade)}:</b> ${esc(sb.gradeCap.reason || '')}</p>` : ''}
+    ${Number.isFinite(sb.evaluatedCategories) && sb.evaluatedCategories < scoreCategories.length ? `<p style="font-size:11px;color:#868e96;margin-top:8px">❔ ${scoreCategories.length - sb.evaluatedCategories} categoria(s) não avaliada(s) nesta sessão — não entram na nota e não devem ser lidas como "sem problemas".</p>` : ''}
+  </div>` : '';
 
   // ── Infraestrutura ──
   let infraHtml = '';
@@ -295,6 +339,9 @@ export function generateEnterpriseHtml({
     const load = infraData.loadPercentiles || {};
     const rep = infraData.reputation || {};
     const tcp = infraData.tcpScan || {};
+    // "Limpo" só com evidência positiva (status PASS); IP privado ou consulta
+    // falhada viram "não se aplica"/"não verificado" em vez de um ✅ sem lastro.
+    const repState = reputationState(rep);
 
     // Timing bar visual
     const total = timing.total_ms || 1;
@@ -331,19 +378,29 @@ export function generateEnterpriseHtml({
             : `nc -vv -w 3 ${targetHost} ${p.port}`;
           const sev = p.severity || 'LOW';
           const sevBg = SEV_COLOR[sev] || '#868e96';
+          // Porta reportada como aberta mas não confirmada na 2ª passagem não
+          // deve ser apresentada com a mesma certeza de uma confirmada.
+          const conf = portConfidence(p);
           return `<tr>
           <td><strong>${p.port}</strong></td>
-          <td>${esc(p.service)}<br><span style="font-size:10px;color:#868e96">${p.latency_ms}ms</span></td>
+          <td>${esc(p.service)}<br><span style="font-size:10px;color:#868e96">${p.latency_ms}ms</span>${conf ? `<br><span style="font-size:10px;color:${conf.color}">${esc(conf.text)}</span>` : ''}</td>
           <td><span class="pill" style="background:${sevBg}">${sev}</span></td>
           <td style="font-size:12px;color:#495057;line-height:1.4">${esc(p.risk || 'Superfície de ataque exposta.')}</td>
           <td style="font-size:12px;color:#2b5c34;line-height:1.4">${esc(p.recommendation || 'Fechar no firewall se não for estritamente necessária.')}</td>
           <td>
-            <button class="btn-action" onclick="copyText('${esc(testCmd)}', this)">📋 Testar (${p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000 ? 'curl' : 'nc'})</button>
+            <button class="btn-action" data-cmd="${esc(testCmd)}" onclick="copyFromData(this)">📋 Testar (${p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000 ? 'curl' : 'nc'})</button>
           </td>
         </tr>`;
         }).join('')}</tbody>
       </table>
-    ` : '<p style="font-size:12px;color:#868e96">Nenhuma porta enterprise aberta detectada (portas web padrão podem estar filtradas pelo CDN).</p>';
+    ` : `<p style="font-size:12px;color:#868e96">${tcp.status === 'INFO'
+        ? 'Nenhuma porta respondeu de forma conclusiva — nada a listar. Isso <b>não</b> é evidência de que as portas estejam fechadas.'
+        : 'Nenhuma porta enterprise aberta detectada (portas web padrão podem estar filtradas pelo CDN).'}</p>`;
+
+    // Aviso de varredura inconclusiva: sem ele, "0 portas abertas" seria lido
+    // como "servidor bem fechado", quando na verdade nada foi verificado.
+    const tcpNotice = tcpScanNotice(tcp);
+    const tcpNoticeHtml = tcpNotice ? `<div class="note" style="margin:8px 0">❔ ${esc(tcpNotice)}</div>` : '';
 
     // Percentis
     const percHtml = load.percentiles ? `
@@ -363,30 +420,32 @@ export function generateEnterpriseHtml({
     const dnsSum = dnsSec.summary || {};
     const dnsRecs = dnsSec.records || {};
 
+    // Cartão de registro DNS. O estado vem do scanner (ok / ausente /
+    // nao_verificado / nao_aplicavel) — nunca inferido de um booleano falsy,
+    // que fazia falha de consulta DNS aparecer como "⚠️ Ausente".
+    const dnsCard = (label, record, evidence) => {
+      const st = dnsRecordState(dnsSec, record);
+      return `<div class="infra-card">
+          <div class="ic-label">${esc(label)}</div>
+          <div class="ic-value" style="color:${st.color}">${esc(st.text)}</div>
+          ${st.state === 'ok' && evidence ? `<div style="font-size:10px;color:#495057;word-break:break-all;margin-top:4px"><code>${esc(evidence)}</code></div>` : ''}
+        </div>`;
+    };
+
     const dnsSecHtml = !dnsSec.isIp && dnsSec.status ? `
       <h3>🛡️ Registros DNS de Segurança & E-mail</h3>
       <div class="infra-grid" style="margin-bottom:12px">
-        <div class="infra-card">
-          <div class="ic-label">SPF (Anti-Spoofing)</div>
-          <div class="ic-value" style="color:${dnsSum.has_spf ? '#2f9e44' : '#f08c00'}">${dnsSum.has_spf ? '✅ Configurado' : '⚠️ Ausente'}</div>
-          ${dnsRecs.SPF ? `<div style="font-size:10px;color:#495057;word-break:break-all;margin-top:4px"><code>${esc(dnsRecs.SPF)}</code></div>` : ''}
-        </div>
-        <div class="infra-card">
-          <div class="ic-label">DMARC (Anti-Phishing)</div>
-          <div class="ic-value" style="color:${dnsSum.has_dmarc ? '#2f9e44' : '#f08c00'}">${dnsSum.has_dmarc ? '✅ Configurado' : '⚠️ Ausente'}</div>
-          ${dnsRecs.DMARC ? `<div style="font-size:10px;color:#495057;word-break:break-all;margin-top:4px"><code>${esc(dnsRecs.DMARC)}</code></div>` : ''}
-        </div>
-        <div class="infra-card">
-          <div class="ic-label">CAA (Autorização de CA)</div>
-          <div class="ic-value" style="color:${dnsSum.has_caa ? '#2f9e44' : '#f08c00'}">${dnsSum.has_caa ? '✅ Configurado' : '⚠️ Sem Restrição'}</div>
-          ${dnsRecs.CAA && dnsRecs.CAA.length ? `<div style="font-size:10px;color:#495057;margin-top:4px"><code>${esc(dnsRecs.CAA.join(', '))}</code></div>` : ''}
-        </div>
+        ${dnsCard('SPF (Anti-Spoofing)', 'SPF', dnsRecs.SPF)}
+        ${dnsCard('DMARC (Anti-Phishing)', 'DMARC', dnsRecs.DMARC)}
+        ${dnsCard('CAA (Autorização de CA)', 'CAA', (dnsRecs.CAA || []).join(', '))}
+        ${dnsCard('PTR (DNS Reverso)', 'PTR', (dnsRecs.PTR || []).join(', '))}
         <div class="infra-card">
           <div class="ic-label">IPv6 (Suporte AAAA)</div>
           <div class="ic-value" style="color:${dnsSum.has_ipv6 ? '#2f9e44' : '#868e96'}">${dnsSum.has_ipv6 ? '✅ Habilitado' : 'ℹ️ Somente IPv4'}</div>
           ${dnsRecs.AAAA && dnsRecs.AAAA.length ? `<div style="font-size:10px;color:#495057;margin-top:4px"><code>${esc(dnsRecs.AAAA[0])}</code></div>` : ''}
         </div>
       </div>
+      ${dnsSec.status === 'INFO' ? `<p style="font-size:11px;color:#868e96;margin:-6px 0 12px">❔ Parte das consultas DNS não retornou resposta conclusiva — os itens marcados como "não verificado" não são afirmações sobre a configuração do domínio.</p>` : ''}
     ` : '';
 
     infraHtml = `
@@ -399,7 +458,11 @@ export function generateEnterpriseHtml({
         <div class="infra-card"><div class="ic-label">ISP</div><div class="ic-value">${esc(geo.isp || '—')}</div></div>
         <div class="infra-card"><div class="ic-label">ASN</div><div class="ic-value">${esc(geo.asn || '—')}</div></div>
         <div class="infra-card"><div class="ic-label">Organização</div><div class="ic-value">${esc(geo.organization || '—')}</div></div>
-        <div class="infra-card"><div class="ic-label">Reputação IP</div><div class="ic-value" style="color:${rep.is_blacklisted ? '#c92a2a' : '#2f9e44'}">${rep.is_blacklisted ? '❌ Blacklisted' : '✅ Limpo'}</div></div>
+        <div class="infra-card">
+          <div class="ic-label">Reputação IP</div>
+          <div class="ic-value" style="color:${repState.color}">${esc(repState.text)}</div>
+          ${repState.detail ? `<div style="font-size:10px;color:#868e96;margin-top:4px">${esc(repState.detail)}</div>` : ''}
+        </div>
       </div>
 
       ${dnsSecHtml}
@@ -408,6 +471,7 @@ export function generateEnterpriseHtml({
       ${timingBarHtml}
 
       <h3>🔌 Portas TCP Abertas (${openPorts.length} de ${tcp.total_scanned || 0})</h3>
+      ${tcpNoticeHtml}
       ${portTableHtml}
 
       ${percHtml ? `<h3>📊 Percentis de Carga</h3>${percHtml}` : ''}
@@ -425,12 +489,19 @@ export function generateEnterpriseHtml({
   const findingHtml = (f) => {
     const ev = evidenceOf ? evidenceOf(f) : [];
     const mv = f.manualVerification;
-    
+    // Alcance vem do dedup (occurrenceCount/occurrences): mostra que o mesmo
+    // problema aparece em N páginas SEM repetir o achado N vezes no relatório.
+    const reach = reachOf(f);
+
     return `<div class="finding sev-${f.severity}">
       <div class="fhead">
         <span class="pill" style="background:${SEV_COLOR[f.severity] || '#868e96'}">${f.severity}</span>
-        <span class="ftitle">${esc(f.label || f.type)}</span>
+        <span class="ftitle">${esc(titleOf(f))}</span>
       </div>
+      ${reach ? `<div class="freach">📡 <b>Alcance:</b> ${esc(reach.text)}${reach.urls.length > 1 ? `
+        <details><summary>ver URLs afetadas (${reach.urls.length})</summary>
+        <ul>${reach.urls.map(u => `<li><a href="${esc(String(u).split(' ')[0])}" target="_blank"><code>${esc(u)}</code></a></li>`).join('')}</ul>
+        </details>` : ''}</div>` : ''}
       <div class="fmeta">${[f.owasp, f.cwe && f.cwe !== '—' ? f.cwe : '', f.confidence ? 'confiança: ' + f.confidence : ''].filter(Boolean).map(esc).join(' · ')}</div>
       ${f.url ? `<div class="fwhere"><b>📍 Onde:</b> <a href="${esc(f.url.split(' ')[0])}" target="_blank"><code>${esc(f.url)}</code></a></div>` : ''}
       ${f.cve ? `<div class="fwhere"><b>CVE:</b> ${esc(f.cve)}${f.fixedIn ? ` — corrigido em ${esc(f.fixedIn)}` : ''}</div>` : ''}
@@ -465,40 +536,53 @@ export function generateEnterpriseHtml({
           </div>
           <pre class="cmd cmd-pow">${esc(mv.proofOfWork)}</pre>
         </div>` : ''}
-        <div style="margin-top:10px;padding:12px 14px;background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #1c7ed6;border-radius:6px;font-size:12px;color:#343a40">
-          <div style="font-weight:700;color:#1c7ed6;margin-bottom:6px;font-size:12px">
-            💡 Resumo Executivo da Prova (Para Gestão & Diretoria)
-          </div>
-          <div style="line-height:1.5">
-            <b>📌 O que este teste comprova:</b> Valida diretamente se o risco <b>"${esc(f.label || f.type)}"</b> está ativo no ambiente ou se já foi protegido.<br>
-            <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:8px">
-              <div style="background:#fff5f5;border:1px solid #ffc9c9;padding:8px 10px;border-radius:6px;color:#c92a2a">
-                <b>🔴 Se Vulnerável (Ambiente em Risco):</b><br>
-                O comando/script exibe o dado exposto ou conexão liberada ("succeeded"). Prova que o atacante tem acesso direto a este vetor.
-              </div>
-              <div style="background:#ebfbee;border:1px solid #b2f2bb;padding:8px 10px;border-radius:6px;color:#2b5c34">
-                <b>🟢 Se Corrigido (Ambiente Protegido):</b><br>
-                O comando retorna vazio, "Connection refused" ou confirmação de bloqueio. Prova que a remediação foi concluída com sucesso.
-              </div>
-            </div>
-          </div>
-        </div>
+        <div class="proof-hint">💡 Como interpretar a saída destes comandos: ver <b>"Resumo Executivo da Prova"</b> no topo desta seção.</div>
       </div>` : ''}
     </div>`;
   };
 
+  // Caixa ÚNICA de interpretação das provas. Este texto era emitido dentro de
+  // CADA achado (≈1,1 KB × 351 = 26% do HTML), literalmente idêntico exceto
+  // pelo título do achado — que já aparece no cabeçalho de cada card.
+  const proofLegendHtml = `
+    <div class="proof-legend">
+      <div class="pl-title">💡 Resumo Executivo da Prova (Para Gestão &amp; Diretoria)</div>
+      <div style="line-height:1.5">
+        <b>📌 O que os testes comprovam:</b> cada achado abaixo traz comandos que validam <i>diretamente</i>
+        se aquele risco específico está ativo no ambiente ou se já foi protegido. A leitura do resultado é sempre a mesma:
+        <div class="pl-grid">
+          <div style="background:#fff5f5;border:1px solid #ffc9c9;padding:8px 10px;border-radius:6px;color:#c92a2a">
+            <b>🔴 Se Vulnerável (Ambiente em Risco):</b><br>
+            O comando/script exibe o dado exposto ou conexão liberada ("succeeded"). Prova que o atacante tem acesso direto a este vetor.
+          </div>
+          <div style="background:#ebfbee;border:1px solid #b2f2bb;padding:8px 10px;border-radius:6px;color:#2b5c34">
+            <b>🟢 Se Corrigido (Ambiente Protegido):</b><br>
+            O comando retorna vazio, "Connection refused" ou confirmação de bloqueio. Prova que a remediação foi concluída com sucesso.
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // Cada grupo OWASP vira uma <section> própria para que o filtro de severidade
+  // possa escondê-la inteira quando nenhum achado dela estiver visível — antes
+  // o <h3> ficava órfão na tela, com uma contagem que não batia com o filtro.
   const owaspSections = Object.entries(byOwasp)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([owasp, items]) => {
       items.sort((x, y) => sevRank[x.severity] - sevRank[y.severity]);
-      return `<h3>${esc(owasp)} <span class="count">(${items.length})</span></h3>${items.map(findingHtml).join('')}`;
+      return `<section class="owasp-group">
+        <h3>${esc(owasp)} <span class="count" data-total="${items.length}">(${items.length})</span></h3>
+        ${items.map(findingHtml).join('')}
+      </section>`;
     }).join('');
 
   // ── Terceiros ──
   const tpGroups = {};
   for (const f of (thirdParty || [])) {
-    const k = `${f.vendor || 'Terceiro'} — ${f.label || f.type}`;
-    tpGroups[k] = (tpGroups[k] || 0) + 1;
+    const k = `${f.vendor || 'Terceiro'} — ${titleOf(f)}`;
+    // Achados de terceiros também passam pelo dedup: somar occurrenceCount
+    // mantém a coluna "Ocorrências" fiel ao volume bruto observado.
+    tpGroups[k] = (tpGroups[k] || 0) + (Number(f.occurrenceCount) || 1);
   }
   const tpRows = Object.entries(tpGroups).sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `<tr><td>${esc(k)}</td><td style="text-align:center">${n}</td></tr>`).join('');
@@ -515,7 +599,7 @@ export function generateEnterpriseHtml({
       <td>${esc(r.kind)}</td>
       <td>${esc(r.phase)}</td>
       <td style="text-align:center">${r.hasAuth ? '🔑' : ''}</td>
-      <td><button class="btn-action" onclick="copyText('${esc(curlCmd)}', this)">📋 cURL</button></td>
+      <td><button class="btn-action" data-cmd="${esc(curlCmd)}" onclick="copyFromData(this)">📋 cURL</button></td>
     </tr>`;
   }).join('');
 
@@ -546,34 +630,25 @@ export function generateEnterpriseHtml({
   </div>` : '';
 
   // ── Testes Gerados com Botões de Cópia ──
+  // Bloco de código com botão de cópia. O texto NÃO é interpolado em literal
+  // JavaScript: o botão lê o textContent do <pre> irmão (copyFromAttr), então
+  // aspas, apóstrofos e crases no conteúdo não quebram nada e o usuário copia
+  // o comando literal — não a versão HTML-escapada (&quot;), que não roda.
+  const codeBlock = (title, content, btnLabel) => `
+    <h3>${esc(title)}</h3>
+    <div class="code-block-wrapper">
+      <pre class="code-block">${esc(content || '')}</pre>
+      <button class="btn-copy" onclick="copyFromAttr(this)">📋 ${esc(btnLabel)}</button>
+    </div>`;
+
   const testsHtml = testArtifacts ? `
   <div class="section">
     <h2>🧪 Testes de Verificação Gerados</h2>
     <p style="font-size:13px;color:#868e96;margin-bottom:12px">Execute estes testes para confirmar que as correções foram aplicadas corretamente.</p>
-    
-    <h3>Playwright (.spec.ts)</h3>
-    <div class="code-block-wrapper">
-      <div class="code-block">${esc(testArtifacts.playwright)}</div>
-      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.playwright).replace(/`/g, '\\`')}\`, this)">📋 Copiar Playwright</button>
-    </div>
-    
-    <h3>cURL</h3>
-    <div class="code-block-wrapper">
-      <div class="code-block">${esc(testArtifacts.code_snippets?.curl || '')}</div>
-      <button class="btn-copy" onclick="copyText('${esc(testArtifacts.code_snippets?.curl || '')}', this)">📋 Copiar cURL</button>
-    </div>
-    
-    <h3>Correção Nginx</h3>
-    <div class="code-block-wrapper">
-      <div class="code-block">${esc(testArtifacts.server_fix?.nginx || '')}</div>
-      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.server_fix?.nginx || '').replace(/`/g, '\\`')}\`, this)">📋 Copiar Config Nginx</button>
-    </div>
-    
-    <h3>Correção Apache</h3>
-    <div class="code-block-wrapper">
-      <div class="code-block">${esc(testArtifacts.server_fix?.apache || '')}</div>
-      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.server_fix?.apache || '').replace(/`/g, '\\`')}\`, this)">📋 Copiar Config Apache</button>
-    </div>
+    ${codeBlock('Playwright (.spec.ts)', testArtifacts.playwright, 'Copiar Playwright')}
+    ${codeBlock('cURL', testArtifacts.code_snippets?.curl, 'Copiar cURL')}
+    ${codeBlock('Correção Nginx', testArtifacts.server_fix?.nginx, 'Copiar Config Nginx')}
+    ${codeBlock('Correção Apache', testArtifacts.server_fix?.apache, 'Copiar Config Apache')}
   </div>` : '';
 
   // ── Regressão ──
@@ -638,13 +713,22 @@ export function generateEnterpriseHtml({
 
   // ── JavaScript Interativo de Cópia ──
   const jsScript = `<script>
+    // Copia o texto do bloco de código irmão. O comando NUNCA é interpolado
+    // dentro de um literal JavaScript no onclick — assim o usuário copia o
+    // comando literal (com aspas de verdade, não &quot;) e rotas com apóstrofo
+    // não quebram o atributo.
     function copyFromAttr(btnElement) {
-      const wrapper = btnElement.closest('.cmd-wrapper');
+      const wrapper = btnElement.closest('.cmd-wrapper, .code-block-wrapper');
       if (!wrapper) return;
-      const cmdEl = wrapper.querySelector('.cmd');
+      const cmdEl = wrapper.querySelector('.cmd, .code-block');
       if (!cmdEl) return;
-      const text = cmdEl.innerText || cmdEl.textContent;
-      copyText(text, btnElement);
+      copyText(cmdEl.innerText || cmdEl.textContent, btnElement);
+    }
+
+    // Mesma ideia para botões soltos (portas, rotas): o comando vive num
+    // data-cmd, que o parser HTML já devolve decodificado em dataset.cmd.
+    function copyFromData(btnElement) {
+      copyText(btnElement.dataset.cmd || '', btnElement);
     }
 
     function copyText(text, btnElement) {
@@ -683,14 +767,27 @@ export function generateEnterpriseHtml({
       }, 2000);
     }
 
+    // Filtra por severidade e mantém os cabeçalhos OWASP coerentes: grupo sem
+    // nenhum achado visível some, e o (N) do título passa a contar o visível.
     function filterFindings(sev, btn) {
       document.querySelectorAll('.filter-btn').forEach(b => b.style.opacity = '0.6');
       if (btn) btn.style.opacity = '1';
-      document.querySelectorAll('.finding').forEach(el => {
-        if (sev === 'ALL' || el.classList.contains('sev-' + sev)) {
-          el.style.display = 'block';
-        } else {
-          el.style.display = 'none';
+
+      document.querySelectorAll('.owasp-group').forEach(group => {
+        let visible = 0;
+        group.querySelectorAll('.finding').forEach(el => {
+          const show = sev === 'ALL' || el.classList.contains('sev-' + sev);
+          el.style.display = show ? 'block' : 'none';
+          if (show) visible++;
+        });
+
+        group.style.display = visible ? '' : 'none';
+
+        const countEl = group.querySelector('.count');
+        if (countEl) {
+          const total = countEl.dataset.total || visible;
+          // Mostra "(3 de 12)" quando filtrado, para não parecer que o grupo encolheu.
+          countEl.textContent = sev === 'ALL' ? '(' + total + ')' : '(' + visible + ' de ' + total + ')';
         }
       });
     }
@@ -743,7 +840,7 @@ ${css}
         <button class="btn-action filter-btn" onclick="filterFindings('LOW', this)" style="background:#1c7ed6;opacity:0.6">🔵 LOW (${counts.LOW})</button>
       </div>
     </div>
-    ${findings.length ? owaspSections : '<p>Nenhum problema de 1ª parte encontrado. 🎉</p>'}
+    ${findings.length ? proofLegendHtml + owaspSections : '<p>Nenhum problema de 1ª parte encontrado. 🎉</p>'}
   </div>
 
   ${(routes || []).length ? `<div class="section">

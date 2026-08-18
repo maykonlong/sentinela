@@ -9,17 +9,42 @@
 import { URL } from 'url';
 
 /**
+ * Headers já cobertos por asserts fixos no template do Playwright — não devem
+ * ser repetidos na parte dinâmica.
+ */
+const BASELINE_HEADERS = ['strict-transport-security', 'x-content-type-options', 'x-frame-options'];
+
+/**
+ * Extrai a lista DISTINTA de headers ausentes.
+ *
+ * Por que dedup: os achados vêm por resposta HTTP (mesmo com dedup.mjs, uma
+ * origem diferente gera outro achado do mesmo header). Sem `Set`, uma auditoria
+ * real com 174 achados de `missing_security_header` sobre 8-9 headers distintos
+ * gerava um .spec.ts de ~29 KB com 177 `expect()` repetidos e um
+ * `server_fix.missing_headers` com 174 entradas — artefato ilegível e inútil
+ * para quem vai corrigir. O que interessa é o CONJUNTO de headers a adicionar.
+ */
+function distinctMissingHeaders(findings = []) {
+  return [...new Set(
+    findings
+      .filter(f => f.type === 'missing_security_header' && f.header)
+      .map(f => String(f.header).trim())
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+/**
  * Gera teste Playwright TypeScript para verificar headers e status.
  */
 function generatePlaywrightTest(targetUrl, findings = []) {
   const parsed = new URL(targetUrl);
   const host = parsed.hostname;
 
-  const headerChecks = findings
-    .filter(f => f.type === 'missing_security_header' && f.header)
-    .map(f => `
-    expect(headers['${f.header.toLowerCase()}']).toBeTruthy();
-    console.log(\`[CHECK] ${f.header}: \${headers['${f.header.toLowerCase()}'] || 'MISSING'}\`);`)
+  const headerChecks = distinctMissingHeaders(findings)
+    .filter(h => !BASELINE_HEADERS.includes(h.toLowerCase()))
+    .map(h => `
+    expect(headers['${h.toLowerCase()}']).toBeTruthy();
+    console.log(\`[CHECK] ${h}: \${headers['${h.toLowerCase()}'] || 'MISSING'}\`);`)
     .join('');
 
   return `import { test, expect } from '@playwright/test';
@@ -203,71 +228,107 @@ func main() {
 }
 
 /**
+ * Catálogo de correção por header: valor recomendado + o porquê.
+ * A chave é o nome do header em minúsculas (como vem do finding).
+ */
+const HEADER_FIXES = {
+  'strict-transport-security':     { canonical: 'Strict-Transport-Security',     value: 'max-age=31536000; includeSubDomains; preload', why: 'HSTS — força HTTPS por 1 ano' },
+  'x-content-type-options':        { canonical: 'X-Content-Type-Options',        value: 'nosniff',                                     why: 'Previne MIME type sniffing' },
+  'x-frame-options':               { canonical: 'X-Frame-Options',               value: 'DENY',                                        why: 'Previne Clickjacking' },
+  'referrer-policy':               { canonical: 'Referrer-Policy',               value: 'strict-origin-when-cross-origin',             why: 'Controla o que o header Referer envia' },
+  'content-security-policy':       { canonical: 'Content-Security-Policy',       value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https:; connect-src 'self' https:;", why: 'CSP básico — AJUSTAR conforme a aplicação antes de aplicar' },
+  'permissions-policy':            { canonical: 'Permissions-Policy',            value: 'camera=(), microphone=(), geolocation=()',    why: 'Bloqueia APIs sensíveis do browser' },
+  'cross-origin-opener-policy':    { canonical: 'Cross-Origin-Opener-Policy',    value: 'same-origin',                                 why: 'Isola o browsing context (proteção XS-Leaks)' },
+  'cross-origin-resource-policy':  { canonical: 'Cross-Origin-Resource-Policy',  value: 'same-origin',                                 why: 'Impede que outros sites carreguem seus recursos' },
+  'cross-origin-embedder-policy':  { canonical: 'Cross-Origin-Embedder-Policy',  value: 'require-corp',                                why: 'Exige opt-in de recursos cross-origin' },
+  'x-permitted-cross-domain-policies': { canonical: 'X-Permitted-Cross-Domain-Policies', value: 'none',                                why: 'Bloqueia crossdomain.xml (Flash/Acrobat legado)' },
+  'cache-control':                 { canonical: 'Cache-Control',                 value: 'no-store, no-cache, must-revalidate',         why: 'Evita cache de páginas autenticadas' },
+  'x-xss-protection':              { canonical: 'X-XSS-Protection',              value: '0',                                           why: 'Desliga o filtro legado (recomendação atual: 0 + CSP)' },
+};
+
+/** Valor genérico quando o header não está no catálogo. */
+function fixFor(header) {
+  const key = String(header).toLowerCase();
+  return HEADER_FIXES[key] || { canonical: header, value: 'AJUSTAR', why: 'Header ausente detectado pelo Sentinela — defina o valor adequado' };
+}
+
+/**
  * Gera snippets de correção para Nginx e Apache baseado nos findings.
+ *
+ * Antes esta função calculava `missingHeaders` e IGNORAVA o resultado: nginx e
+ * apache eram strings estáticas, idênticas em toda auditoria. Consequência
+ * prática: o relatório mandava "adicione X-Frame-Options" mesmo quando o alvo
+ * já tinha X-Frame-Options, e omitia headers ausentes que não estavam na lista
+ * fixa (COOP/CORP/COEP, por exemplo). Agora as linhas saem da lista REAL de
+ * headers ausentes — se nada está faltando, o snippet diz isso em vez de
+ * sugerir configuração desnecessária.
  */
 function generateServerSnippets(findings = []) {
-  const missingHeaders = findings
-    .filter(f => f.type === 'missing_security_header')
-    .map(f => f.header);
+  const missingHeaders = distinctMissingHeaders(findings);
+  // Só sugere esconder a versão do servidor se o Sentinela realmente viu
+  // vazamento de versão (Server:/X-Powered-By).
+  const leaksVersion = findings.some(f => f.type === 'information_disclosure_header');
+  const cacheSensitive = findings.some(f => f.type === 'cache_control_sensitive');
 
   const nginxLines = [
     '# ──────────────────────────────────────────────────────────',
     '# Correção de Security Headers — Nginx',
     '# Adicione ao bloco server {} do seu site',
+    `# Gerado a partir dos ${missingHeaders.length} header(s) AUSENTE(S) neste alvo.`,
     '# ──────────────────────────────────────────────────────────',
     '',
-    '# HSTS — Força HTTPS por 1 ano',
-    'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
-    '',
-    '# Previne MIME type sniffing',
-    'add_header X-Content-Type-Options "nosniff" always;',
-    '',
-    '# Previne Clickjacking',
-    'add_header X-Frame-Options "DENY" always;',
-    '',
-    '# Controla o que o header Referer envia',
-    'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
-    '',
-    '# CSP básico (ajustar conforme a aplicação)',
-    "add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https:; connect-src 'self' https:;\" always;",
-    '',
-    '# Permissions Policy',
-    'add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;',
-    '',
-    '# Ocultar versão do servidor',
-    'server_tokens off;',
-    '',
-    '# Cache-Control para páginas autenticadas',
-    '# (adicionar no location das rotas autenticadas)',
-    '# add_header Cache-Control "no-store, no-cache, must-revalidate" always;',
   ];
+
+  if (!missingHeaders.length) {
+    nginxLines.push('# ✅ Nenhum header de segurança ausente foi detectado neste alvo.');
+    nginxLines.push('#    Nada a adicionar aqui.');
+  } else {
+    for (const h of missingHeaders) {
+      const fix = fixFor(h);
+      nginxLines.push(`# ${fix.why}`);
+      nginxLines.push(`add_header ${fix.canonical} "${fix.value}" always;`);
+      nginxLines.push('');
+    }
+  }
+
+  if (leaksVersion) {
+    nginxLines.push('# Ocultar versão do servidor (Server:/X-Powered-By detectado)');
+    nginxLines.push('server_tokens off;');
+    nginxLines.push('');
+  }
+  if (cacheSensitive) {
+    nginxLines.push('# Cache-Control para páginas autenticadas');
+    nginxLines.push('# (adicionar no location das rotas autenticadas)');
+    nginxLines.push('add_header Cache-Control "no-store, no-cache, must-revalidate" always;');
+  }
 
   const apacheLines = [
     '# ──────────────────────────────────────────────────────────',
     '# Correção de Security Headers — Apache (.htaccess ou httpd.conf)',
+    `# Gerado a partir dos ${missingHeaders.length} header(s) AUSENTE(S) neste alvo.`,
     '# ──────────────────────────────────────────────────────────',
     '',
-    '<IfModule mod_headers.c>',
-    '    # HSTS',
-    '    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"',
-    '',
-    '    # Previne MIME type sniffing',
-    '    Header always set X-Content-Type-Options "nosniff"',
-    '',
-    '    # Previne Clickjacking',
-    '    Header always set X-Frame-Options "DENY"',
-    '',
-    '    # Referer Policy',
-    '    Header always set Referrer-Policy "strict-origin-when-cross-origin"',
-    '',
-    '    # Permissions Policy',
-    '    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"',
-    '</IfModule>',
-    '',
-    '# Ocultar versão',
-    'ServerSignature Off',
-    'ServerTokens Prod',
   ];
+
+  if (!missingHeaders.length) {
+    apacheLines.push('# ✅ Nenhum header de segurança ausente foi detectado neste alvo.');
+  } else {
+    apacheLines.push('<IfModule mod_headers.c>');
+    for (const h of missingHeaders) {
+      const fix = fixFor(h);
+      apacheLines.push(`    # ${fix.why}`);
+      apacheLines.push(`    Header always set ${fix.canonical} "${fix.value}"`);
+      apacheLines.push('');
+    }
+    apacheLines.push('</IfModule>');
+  }
+
+  if (leaksVersion) {
+    apacheLines.push('');
+    apacheLines.push('# Ocultar versão (Server:/X-Powered-By detectado)');
+    apacheLines.push('ServerSignature Off');
+    apacheLines.push('ServerTokens Prod');
+  }
 
   return {
     nginx: nginxLines.join('\n'),

@@ -3,6 +3,20 @@
  * Monitora chamadas de API e detecta padrões inseguros
  */
 
+import { sameRegistrableDomain, classifyResource } from './context-rules.mjs';
+
+/**
+ * Destinos já reportados em `cross_origin_auth`, para emitir 1 achado por HOST
+ * de destino em vez de 1 por requisição. Sem isso, um fluxo OIDC normal (dezenas
+ * de chamadas ao mesmo IdP) inflava o relatório com dezenas de MEDIUM idênticos.
+ */
+const reportedCrossOriginAuth = new Set();
+
+/** Limpa o estado de agregação (útil entre execuções/testes no mesmo processo). */
+export function resetNetworkAggregation() {
+  reportedCrossOriginAuth.clear();
+}
+
 const SENSITIVE_URL_PATTERNS = [
   { regex: /[?&](?:token|key|secret|password|passwd|api_key|apikey|access_token|auth)=([^&]+)/gi, label: 'Credencial na query string', severity: 'CRITICAL' },
   { regex: /[?&](?:cpf|cnpj|email|phone|telefone|celular)=([^&]+)/gi, label: 'PII na query string', severity: 'HIGH' },
@@ -82,24 +96,48 @@ export function analyzeRequest(request) {
     }
   }
 
-  // Requisição para domínio externo com credenciais
+  // Requisição para domínio externo com credenciais.
+  //
+  // A comparação antiga era por host EXATO (`reqHost !== pageHost`), o que
+  // transformava o fluxo OIDC normal em achado: `auth-stg-col.cmsw.com` e
+  // `bancopopular-corner-stg-col.cmsw.com` são hosts diferentes mas o MESMO
+  // domínio registrável (cmsw.com) — mandar cookie/token ali é o desenho
+  // esperado, não vazamento. Agora comparamos domínio registrável e agregamos
+  // por host de destino.
   const pageOrigin = request.pageOrigin;
   if (pageOrigin) {
     try {
       const reqHost = new URL(url).hostname;
       const pageHost = new URL(pageOrigin).hostname;
+      const hasAuthHeader = !!(headers['authorization'] || headers['Authorization']);
+      const hasCookie = !!headers['cookie'];
 
-      if (reqHost !== pageHost && (headers['authorization'] || headers['Authorization'] || headers['cookie'])) {
-        findings.push({
-          type: 'cross_origin_auth',
-          severity: 'MEDIUM',
-          label: 'Credenciais enviadas para domínio externo',
-          url: maskUrl(url),
-          pageOrigin,
-          method,
-          risk: 'Tokens/cookies estão sendo enviados para um domínio diferente. Verificar se este domínio é confiável.',
-          recommendation: 'Validar que requisições autenticadas vão apenas para domínios sob seu controle.',
-        });
+      if (!sameRegistrableDomain(reqHost, pageHost) && (hasAuthHeader || hasCookie)) {
+        const dedupKey = `${pageHost}=>${reqHost}`;
+        if (!reportedCrossOriginAuth.has(dedupKey)) {
+          reportedCrossOriginAuth.add(dedupKey);
+          const { thirdParty, vendor } = classifyResource(url, pageOrigin);
+          findings.push({
+            type: 'cross_origin_auth',
+            // MEDIUM só com Authorization (token da aplicação saindo do domínio).
+            // Só cookie é o comportamento padrão do navegador para um host que
+            // ele mesmo setou (beacon de analytics, CDN) — evidência fraca, LOW.
+            severity: hasAuthHeader ? 'MEDIUM' : 'LOW',
+            thirdParty,
+            vendor: vendor || null,
+            label: hasAuthHeader
+              ? `Token de autenticação enviado para domínio externo (${reqHost})`
+              : `Cookies enviados para domínio externo (${reqHost})`,
+            url: maskUrl(url),
+            targetHost: reqHost,
+            pageOrigin,
+            method,
+            risk: hasAuthHeader
+              ? `O header Authorization está sendo enviado para ${reqHost}, que está fora do domínio registrável da aplicação (${pageHost}). Confirmar que este destino é um serviço confiável e sob seu controle/contrato.`
+              : `Cookies estão sendo enviados para ${reqHost}, domínio registrável diferente do da aplicação (${pageHost}). Normal para vendor/CDN, mas relevante para LGPD (compartilhamento com terceiros).`,
+            recommendation: 'Validar que requisições autenticadas vão apenas para domínios sob seu controle ou de fornecedores contratados. Restringir escopo/domínio dos cookies (atributo Domain) ao necessário.',
+          });
+        }
       }
     } catch {
       // URL inválida

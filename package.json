@@ -12,9 +12,12 @@
     "done":          "node sentinela.mjs done",
     "status":        "node sentinela.mjs status",
     "sessions":      "node sentinela.mjs sessions",
+    "report":        "node sentinela.mjs report",
     "audit":         "node src/auditor.mjs",
     "audit:crawl":   "node src/auditor.mjs --crawl",
-    "audit:active":  "node src/auditor.mjs --active"
+    "audit:active":  "node src/auditor.mjs --active",
+    "test":          "node test/owasp-map-coverage.mjs && node scratch/test_snippets.mjs",
+    "test:owasp":    "node test/owasp-map-coverage.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",

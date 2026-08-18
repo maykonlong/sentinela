@@ -6,6 +6,8 @@
  * com verificação manual, testes gerados.
  */
 
+import { titleOf, reachOf, dnsRecordState, reputationState, portConfidence, tcpScanNotice } from './labels.mjs';
+
 /**
  * Gera o relatório Markdown completo.
  */
@@ -14,9 +16,13 @@ export function generateEnterpriseMd({
   scoreBreakdown, infraData, testArtifacts, regression, counts, evidenceOf,
 }) {
   const lines = [];
-  const score = scoreBreakdown.totalScore;
-  const grade = scoreBreakdown.grade;
-  const gradeLabel = scoreBreakdown.gradeLabel;
+  // Leitura defensiva: computeScoreBreakdown (outro dono) pode ganhar campos
+  // novos; só dependemos de totalScore/grade/gradeLabel e toleramos ausências.
+  const sb = scoreBreakdown || {};
+  const score = sb.totalScore ?? 0;
+  const grade = sb.grade ?? '—';
+  const gradeLabel = sb.gradeLabel ?? '';
+  const scoreCategories = Array.isArray(sb.categories) ? sb.categories : [];
 
   lines.push('# 🛡️ Sentinela — Relatório de Auditoria de Segurança');
   lines.push('');
@@ -45,14 +51,30 @@ export function generateEnterpriseMd({
   lines.push('');
 
   // ── Score Breakdown ──
-  lines.push('## 📈 Score por Categoria');
-  lines.push('');
-  lines.push('| Categoria | Pontos | Deduções | Achados |');
-  lines.push('|-----------|:------:|:--------:|:-------:|');
-  for (const cat of scoreBreakdown.categories) {
-    lines.push(`| ${cat.label} | ${cat.earnedPts}/${cat.maxPts} | ${cat.deduction} | ${cat.issueCount} |`);
+  if (scoreCategories.length) {
+    lines.push('## 📈 Score por Categoria');
+    lines.push('');
+    lines.push('| Categoria | Pontos | Deduções | Achados |');
+    lines.push('|-----------|:------:|:--------:|:-------:|');
+    for (const cat of scoreCategories) {
+      // Categoria não avaliada não pode sair como "0 achados" (leitura natural:
+      // "está tudo certo aqui"). `undefined` = módulo antigo, sempre avaliava.
+      if (cat.evaluated === false) {
+        lines.push(`| ${cat.label} | — | — | ❔ não avaliado |`);
+      } else {
+        lines.push(`| ${cat.label} | ${cat.earnedPts}/${cat.maxPts} | ${cat.deduction} | ${cat.issueCount} |`);
+      }
+    }
+    lines.push('');
+    if (sb.gradeCap && sb.gradeCap.applied) {
+      lines.push(`> ⚠️ **Nota limitada a ${sb.gradeCap.maxGrade}:** ${sb.gradeCap.reason || ''}`);
+      lines.push('');
+    }
+    if (Number.isFinite(sb.evaluatedCategories) && sb.evaluatedCategories < scoreCategories.length) {
+      lines.push(`> ❔ ${scoreCategories.length - sb.evaluatedCategories} categoria(s) não avaliada(s) nesta sessão — não entram na nota e não significam "sem problemas".`);
+      lines.push('');
+    }
   }
-  lines.push('');
 
   // ── Módulo LGPD & Compliance ──
   const lgpdIssues = (findings || []).filter(f => f.type.startsWith('pii_') || f.type.includes('privacy') || f.type.includes('optin') || f.type.includes('cookie_consent'));
@@ -86,7 +108,9 @@ export function generateEnterpriseMd({
     lines.push(`- **IP:** ${geo.ip || timing.ip || '—'}`);
     lines.push(`- **Localização:** ${geo.city || '—'}, ${geo.country || '—'} ${geo.country_code || ''}`);
     lines.push(`- **ISP:** ${geo.isp || '—'} · **ASN:** ${geo.asn || '—'}`);
-    lines.push(`- **Reputação IP:** ${rep.is_blacklisted ? '❌ Blacklisted (' + (rep.blacklists_flagged || []).join(', ') + ')' : '✅ Limpo'}`);
+    // "Limpo" exige status PASS. IP privado / consulta falhada não viram ✅.
+    const repState = reputationState(rep);
+    lines.push(`- **Reputação IP:** ${repState.text}${repState.detail ? ` — ${repState.detail}` : ''}`);
     lines.push('');
 
     const dnsSec = infraData.dnsSecurity || {};
@@ -95,10 +119,27 @@ export function generateEnterpriseMd({
       const recs = dnsSec.records || {};
       lines.push('### 🛡️ Registros DNS de Segurança & E-mail');
       lines.push('');
-      lines.push(`- **SPF (Anti-Spoofing):** ${sum.has_spf ? '✅ Configurado (`' + recs.SPF + '`)' : '⚠️ Ausente (Risco de Email Spoofing)'}`);
-      lines.push(`- **DMARC (Anti-Phishing):** ${sum.has_dmarc ? '✅ Configurado (`' + recs.DMARC + '`)' : '⚠️ Ausente (Sem política de rejeição)'}`);
-      lines.push(`- **CAA (Autorização de CA):** ${sum.has_caa ? '✅ Configurado (`' + (recs.CAA || []).join(', ') + '`)' : '⚠️ Sem Restrição (Qualquer CA pública pode emitir)'}`);
+
+      // Estado vem do scanner (ok/ausente/nao_verificado/nao_aplicavel). Falha
+      // de consulta DNS não pode mais ser impressa como "⚠️ Ausente".
+      const dnsLine = (label, record, evidence, whenMissing) => {
+        const st = dnsRecordState(dnsSec, record);
+        const extra = st.state === 'ok'
+          ? (evidence ? ` (\`${evidence}\`)` : '')
+          : (st.state === 'ausente' && whenMissing ? ` (${whenMissing})` : '');
+        lines.push(`- **${label}:** ${st.text}${extra}`);
+      };
+
+      dnsLine('SPF (Anti-Spoofing)', 'SPF', recs.SPF, 'Risco de Email Spoofing');
+      dnsLine('DMARC (Anti-Phishing)', 'DMARC', recs.DMARC, 'Sem política de rejeição');
+      dnsLine('CAA (Autorização de CA)', 'CAA', (recs.CAA || []).join(', '), 'Qualquer CA pública pode emitir');
+      dnsLine('PTR (DNS Reverso)', 'PTR', (recs.PTR || []).join(', '), 'Sem resolução reversa');
       lines.push(`- **IPv6 (Suporte AAAA):** ${sum.has_ipv6 ? '✅ Habilitado (`' + recs.AAAA[0] + '`)' : 'ℹ️ Somente IPv4'}`);
+
+      if (dnsSec.status === 'INFO') {
+        lines.push('');
+        lines.push('> ❔ Parte das consultas DNS não retornou resposta conclusiva. Itens marcados como "não verificado" não são afirmações sobre a configuração do domínio.');
+      }
       lines.push('');
     }
 
@@ -118,16 +159,27 @@ export function generateEnterpriseMd({
 
     const openPorts = (tcp.ports || []).filter(p => p.state === 'OPEN');
     const targetHost = geo.ip || timing.ip || '10.4.0.20';
+    // Varredura inconclusiva precisa aparecer mesmo (ou principalmente) quando
+    // nenhuma porta foi listada — "0 abertas" sem verificação não é boa notícia.
+    const tcpNotice = tcpScanNotice(tcp);
+    if (tcpNotice) {
+      lines.push('### 🔌 Portas TCP');
+      lines.push('');
+      lines.push(`> ❔ ${tcpNotice}`);
+      lines.push('');
+    }
+
     if (openPorts.length > 0) {
       lines.push('### 🔌 Portas TCP Abertas (Risco & Recomendações)');
       lines.push('');
-      lines.push('| Porta | Serviço | Latência | Nível | Risco & Por Quê | Recomendação de Proteção | Comando de Teste |');
-      lines.push('|------:|---------|--------:|-------|-----------------|--------------------------|------------------|');
+      lines.push('| Porta | Serviço | Latência | Confirmação | Nível | Risco & Por Quê | Recomendação de Proteção | Comando de Teste |');
+      lines.push('|------:|---------|--------:|-------------|-------|-----------------|--------------------------|------------------|');
       for (const p of openPorts) {
         const testCmd = p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000
           ? `\`curl -skD - "http${p.port === 443 || p.port === 8443 ? 's' : ''}://${targetHost}:${p.port}"\``
           : `\`nc -vv -w 3 ${targetHost} ${p.port}\``;
-        lines.push(`| **${p.port}** | ${p.service} | ${p.latency_ms}ms | **${p.severity || 'LOW'}** | ${p.risk || 'Superfície de ataque exposta.'} | ${p.recommendation || 'Fechar no firewall se não utilizada.'} | ${testCmd} |`);
+        const conf = portConfidence(p);
+        lines.push(`| **${p.port}** | ${p.service} | ${p.latency_ms}ms | ${conf ? conf.text : '✅ confirmada'} | **${p.severity || 'LOW'}** | ${p.risk || 'Superfície de ataque exposta.'} | ${p.recommendation || 'Fechar no firewall se não utilizada.'} | ${testCmd} |`);
       }
       lines.push('');
     }
@@ -159,11 +211,27 @@ export function generateEnterpriseMd({
     lines.push('');
 
     for (const f of items) {
-      lines.push(`#### [${f.severity}] ${f.label || f.type}`);
+      lines.push(`#### [${f.severity}] ${titleOf(f)}`);
       lines.push('');
 
       const badge = [f.owasp, f.cwe && f.cwe !== '—' ? f.cwe : '', f.confidence ? `confiança: ${f.confidence}` : ''].filter(Boolean).join(' · ');
       if (badge) { lines.push(`\`${badge}\``); lines.push(''); }
+
+      // Alcance (occurrences do dedup): diz em quantas páginas o problema foi
+      // visto, em vez de repetir o mesmo achado uma vez por URL.
+      const reach = reachOf(f);
+      if (reach) {
+        lines.push(`**📡 Alcance:** ${reach.text}`);
+        if (reach.urls.length > 1) {
+          lines.push('');
+          lines.push('<details><summary>URLs afetadas</summary>');
+          lines.push('');
+          reach.urls.forEach(u => lines.push(`- \`${u}\``));
+          lines.push('');
+          lines.push('</details>');
+        }
+        lines.push('');
+      }
 
       if (f.url) lines.push(`**📍 Onde:** \`${f.url}\``);
 
@@ -206,8 +274,9 @@ export function generateEnterpriseMd({
     lines.push('');
     const groups = {};
     for (const f of tpItems) {
-      const g = `${f.vendor || 'Terceiro'} — ${f.label || f.type}`;
-      groups[g] = (groups[g] || 0) + 1;
+      const g = `${f.vendor || 'Terceiro'} — ${titleOf(f)}`;
+      // Somar occurrenceCount mantém a coluna fiel ao volume bruto pós-dedup.
+      groups[g] = (groups[g] || 0) + (Number(f.occurrenceCount) || 1);
     }
     lines.push('| Origem / Tipo | Ocorrências |');
     lines.push('|---------------|:-----------:|');

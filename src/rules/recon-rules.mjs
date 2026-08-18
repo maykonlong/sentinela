@@ -25,6 +25,33 @@ const EVIL_REDIRECT = 'https://sentinela-openredir.example/pwned';
 const SENSITIVE_PATH_RE = /admin|manage|gerenc|config|backup|\.git|\.env|internal|intern|private|privad|debug|phpmyadmin|swagger|api-docs|console|dump|logs?\b|wp-admin/i;
 const LOGIN_REDIRECT_RE = /login|signin|sign-in|auth|sso|entrar|acesso/i;
 
+// Paths que, se realmente existissem, devolveriam texto/binário — NUNCA uma
+// página HTML. Se o corpo começa com <html/<!doctype, o que voltou foi o app
+// shell do catch-all, não o arquivo.
+const TEXT_ONLY_PATH_RE = /\.git|\.env|\.svn|backup|dump|\.sql|\.bak|\.old|\.zip|\.tar|logs?\b/i;
+const HTML_START_RE = /^\s*(?:<!doctype\s+html|<html\b|<\?xml[^>]*>\s*<html\b)/i;
+
+// Baseline de "soft-404" do alvo: resposta de um path garantidamente inexistente.
+// Vive em escopo de módulo porque `diffAccessControl` é chamado pelo auditor com
+// assinatura fixa (anon, auth, pageOrigin) e não teria como recebê-lo por
+// parâmetro. Preenchido por runRecon, consumido por diffAccessControl.
+let soft404Baseline = null;
+
+const BODY_START_LEN = 200;
+
+/** Início normalizado do corpo — para comparar respostas sem ruído de espaços. */
+function bodyStartOf(body) {
+  return String(body || '').slice(0, BODY_START_LEN * 4).replace(/\s+/g, ' ').trim().slice(0, BODY_START_LEN);
+}
+
+/** Hash barato (FNV-1a) do corpo inteiro — detecta resposta byte-a-byte igual. */
+function bodyHash(body) {
+  const s = String(body || '');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
 const STACK_PATTERNS = [
   /Traceback \(most recent call last\)/,
   /\bat [\w.$<>[\]]+\([^)]*:\d+:\d+\)/,               // JS/Node/Java frame
@@ -50,16 +77,8 @@ async function safeGet(request, url, extra = {}) {
   }
 }
 
-async function safePost(request, url, data, extra = {}) {
-  try {
-    const res = await request.post(url, { data, timeout: 8000, failOnStatusCode: false, ...extra });
-    let body = '';
-    try { body = await res.text(); } catch { /* ignore */ }
-    return { status: res.status(), body, len: body.length };
-  } catch {
-    return null;
-  }
-}
+// (safePost foi removido junto com a checagem duplicada de GraphQL — o único
+//  consumidor. A checagem agora vive só em api-cloud-rules.mjs.)
 
 // ─── Fingerprint ───────────────────────────────────────────
 
@@ -120,6 +139,25 @@ export async function runRecon(request, pageOrigin, opts = {}) {
   // Headers da raiz (para fingerprint e base)
   const root = await safeGet(request, pageOrigin + '/');
   if (root) findings.push(...fingerprintFromHeaders(root.headers));
+
+  // 0) BASELINE DE SOFT-404 — obrigatório ANTES de qualquer probe de path.
+  // FP concreto evitado: em SPA com rota catch-all (rewrite do Next.js, nginx
+  // `try_files ... /index.html`, S3+CloudFront), QUALQUER path devolve 200 com o
+  // index.html do app. Sem baseline, os 24 paths de COMMON_PATHS viravam ~15
+  // achados MEDIUM/HIGH de "Broken Access Control" de uma vez — incluindo
+  // "/.git/config acessível sem login (HIGH)" quando o que voltou foi a home.
+  // Requisitando um path que garantidamente não existe, sabemos exatamente com o
+  // que se parece um "não encontrado" nesse alvo, e podemos descartar o resto.
+  const baselinePath = `/sentinela-baseline-404-${Math.random().toString(36).slice(2, 10)}`;
+  const baseRes = await safeGet(request, pageOrigin + baselinePath);
+  soft404Baseline = {
+    origin: pageOrigin,
+    path: baselinePath,
+    // Resposta do path inexistente. Se vier 200, o alvo TEM catch-all.
+    miss: baseRes ? { status: baseRes.status, len: baseRes.len, bodyStart: bodyStartOf(baseRes.body), hash: bodyHash(baseRes.body) } : null,
+    // A home também serve de referência: catch-all costuma devolver exatamente ela.
+    root: root && root.status === 200 ? { status: root.status, len: root.len, bodyStart: bodyStartOf(root.body), hash: bodyHash(root.body) } : null,
+  };
 
   // 1) robots.txt
   const robots = await safeGet(request, pageOrigin + '/robots.txt');
@@ -193,16 +231,14 @@ export async function runRecon(request, pageOrigin, opts = {}) {
     }
   }
 
-  // 5) GraphQL introspection
-  const gql = await safePost(request, pageOrigin + '/graphql', { query: '{__schema{types{name}}}' });
-  if (gql && gql.status === 200 && /__schema|"types"/i.test(gql.body)) {
-    findings.push({
-      type: 'graphql_introspection', severity: 'MEDIUM', thirdParty: false,
-      label: 'GraphQL com introspection habilitada', url: pageOrigin + '/graphql',
-      risk: 'Introspection ligado entrega o schema completo da API GraphQL (tipos, queries, mutations) — mapa perfeito para um atacante.',
-      recommendation: 'Desabilitar introspection em produção.',
-    });
-  }
+  // 5) [REMOVIDO] GraphQL introspection — a checagem vivia aqui E em
+  // api-cloud-rules.mjs (`checkGraphQlIntrospection`), com severidades
+  // divergentes (MEDIUM aqui, HIGH lá). FP concreto evitado: o MESMO /graphql
+  // saía DUAS vezes no relatório, com gravidades diferentes, e a versão daqui
+  // aceitava um simples `/__schema|"types"/` no corpo — o que casa a resposta de
+  // ERRO que ecoa a query enviada. Consolidado numa única implementação em
+  // api-cloud-rules.mjs, que testa 4 endpoints e valida a ESTRUTURA da resposta.
+  // O tipo emitido continua sendo `graphql_introspection` (o mapeado em owasp-map).
 
   // 6) CORS refletido — mando um Origin arbitrário e vejo se volta no ACAO
   const cors = await safeGet(request, pageOrigin + '/', { headers: { Origin: EVIL_ORIGIN } });
@@ -272,12 +308,42 @@ export async function probePaths(request, pageOrigin, paths) {
     const url = p.startsWith('http') ? p : pageOrigin + (p.startsWith('/') ? p : '/' + p);
     const r = await safeGet(request, url);
     if (!r) continue;
-    results[p] = { status: r.status, len: r.len, location: r.location };
+    // `bodyStart` e `hash` são a EVIDÊNCIA: sem eles, diffAccessControl só via
+    // status+tamanho e não tinha como distinguir "o arquivo existe" de "o
+    // catch-all devolveu o app shell". São ~200 bytes por path, custo desprezível.
+    results[p] = {
+      status: r.status, len: r.len, location: r.location,
+      bodyStart: bodyStartOf(r.body), hash: bodyHash(r.body),
+    };
   }
   return results;
 }
 
 // ─── Diff de controle de acesso (anônimo vs autenticado) ──
+
+/**
+ * A resposta `r` é indistinguível de um "não encontrado" desse alvo?
+ * Compara contra o baseline de soft-404 e contra a home. Retorna o motivo do
+ * descarte (string) ou null se a resposta é mesmo distinta.
+ */
+function soft404Reason(r, baseline) {
+  if (!r || !baseline) return null;
+  for (const [nome, ref] of [['baseline 404', baseline.miss], ['home do app', baseline.root]]) {
+    if (!ref || ref.status !== r.status) continue;
+    // Um corpo é HTML e o outro não → são coisas diferentes, ponto. Sem esta
+    // guarda, um /.git/config REAL de 224 bytes poderia ser descartado só porque
+    // a página de 404 do alvo tem tamanho parecido (falso NEGATIVO).
+    if (HTML_START_RE.test(r.bodyStart || '') !== HTML_START_RE.test(ref.bodyStart || '')) continue;
+    // Corpo byte-a-byte igual: é literalmente a mesma página.
+    if (ref.hash && r.hash && ref.hash === r.hash) return `corpo idêntico à ${nome}`;
+    // Tamanho ≈ igual (±5%): o app shell varia só por nonce/timestamp embutido.
+    const delta = ref.len ? Math.abs(r.len - ref.len) / ref.len : 1;
+    if (delta <= 0.05) return `tamanho ≈ ${nome} (${r.len} vs ${ref.len} bytes, ${(delta * 100).toFixed(1)}%)`;
+    // Mesmo com tamanho diferente, mesmo começo de corpo = mesmo template.
+    if (ref.bodyStart && r.bodyStart && ref.bodyStart === r.bodyStart) return `início do corpo idêntico à ${nome}`;
+  }
+  return null;
+}
 
 export function diffAccessControl(anon, auth, pageOrigin) {
   const findings = [];
@@ -285,27 +351,46 @@ export function diffAccessControl(anon, auth, pageOrigin) {
   const isLoginRedirect = (r) => r && [301, 302, 303, 307, 308].includes(r.status) && LOGIN_REDIRECT_RE.test(r.location || '');
   const isBlocked = (r) => r && (r.status === 401 || r.status === 403 || isLoginRedirect(r));
 
+  // Só uso o baseline se ele for DESTE alvo (runRecon pode não ter rodado).
+  const baseline = soft404Baseline && soft404Baseline.origin === pageOrigin ? soft404Baseline : null;
+
   const allPaths = new Set([...Object.keys(anon || {}), ...Object.keys(auth || {})]);
   for (const p of allPaths) {
     const a = (anon || {})[p];
     const b = (auth || {})[p];
     const sensitive = SENSITIVE_PATH_RE.test(p);
 
-    // 1) Acessível ANONIMAMENTE e sensível → controle de acesso quebrado
+    // 1) Acessível ANONIMAMENTE e sensível → controle de acesso quebrado.
+    //    Exige EVIDÊNCIA POSITIVA: 200 com corpo não é prova de nada se o corpo
+    //    for o mesmo do "não encontrado". Dois filtros anti-FP:
+    //    (a) resposta indistinguível do baseline de soft-404 / da home;
+    //    (b) HTML devolvido para path que só poderia ser texto/binário.
     if (isOpen(a) && sensitive) {
+      const motivo = soft404Reason(a, baseline);
+      if (motivo) continue;  // catch-all da SPA respondendo tudo com o app shell
+
+      // FP concreto: "/.git/config acessível sem login (HIGH)" onde o corpo era
+      // `<!DOCTYPE html>…` — a home do Next.js. Um .git/config real é texto
+      // `[core]\n\trepositoryformatversion = 0`, nunca HTML.
+      if (TEXT_ONLY_PATH_RE.test(p) && HTML_START_RE.test(a.bodyStart || '')) continue;
+
       findings.push({
         type: 'broken_access_control', severity: /\.git|\.env|backup|dump|config/i.test(p) ? 'HIGH' : 'MEDIUM',
         thirdParty: false, phase: 'PRÉ-LOGIN', confidence: 'provável',
         label: `Caminho sensível acessível SEM login: ${p}`,
         url: pageOrigin + p,
-        currentValue: `anônimo: HTTP ${a.status}, ${a.len} bytes`,
-        risk: `O caminho "${p}" respondeu 200 com conteúdo para um usuário NÃO autenticado. Se for mesmo uma área sensível, qualquer pessoa acessa sem credenciais (Broken Access Control). Confirmar que não é página de "não encontrado" genérica.`,
+        currentValue: `anônimo: HTTP ${a.status}, ${a.len} bytes${baseline && baseline.miss ? ` (404 do alvo: HTTP ${baseline.miss.status}, ${baseline.miss.len} bytes — resposta DIFERENTE)` : ''}`,
+        risk: `O caminho "${p}" respondeu 200 com conteúdo DIFERENTE da página de "não encontrado" deste alvo para um usuário NÃO autenticado. Se for mesmo uma área sensível, qualquer pessoa acessa sem credenciais (Broken Access Control).`,
         recommendation: 'Exigir autenticação e autorização no servidor para esse caminho. Não depender de "esconder" a URL.',
       });
       continue;
     }
 
-    // 2) Bloqueado anônimo, mas 200 autenticado, e é área ADMIN → revisar escalonamento
+    // 2) Bloqueado anônimo, mas 200 autenticado, e é área ADMIN → revisar escalonamento.
+    //    Mesmo filtro: se o 200 autenticado é só o app shell, não houve acesso a
+    //    área administrativa nenhuma.
+    if (isOpen(b) && soft404Reason(b, baseline)) continue;
+
     if (isBlocked(a) && isOpen(b) && /admin|manage|gerenc|console|interno|internal/i.test(p)) {
       findings.push({
         type: 'privilege_escalation', severity: 'LOW', thirdParty: false, phase: 'PÓS-LOGIN', confidence: 'provável',

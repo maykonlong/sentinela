@@ -3,7 +3,7 @@
  * Detecta chaves de API, tokens hardcoded, roles/permissões no frontend, eval(), etc.
  */
 
-import { isMinified } from './context-rules.mjs';
+import { isMinified, classifyResource } from './context-rules.mjs';
 
 // confidence: 'strong' = formato específico, ~0 falso-positivo, roda até em minificado.
 //             'weak'   = baseado em rótulo (ex.: "password:"), dispara FP em código
@@ -19,7 +19,27 @@ const API_KEY_PATTERNS = [
 
   // Firebase
   { regex: /(?:firebase|firebaseio)\.com[^\s'"`)]+/gi, label: 'Firebase URL', severity: 'HIGH', confidence: 'weak' },
-  { regex: /(?:apiKey|authDomain|databaseURL|projectId|storageBucket|messagingSenderId|appId|measurementId)\s*[:=]\s*['"`]([^'"`]+)['"`]/gi, label: 'Firebase Config', severity: 'HIGH', confidence: 'weak' },
+  // Firebase Config: `appId`/`projectId`/`measurementId` sozinhos são chaves
+  // genéricas usadas por GTM, Sentry e config própria — `{ projectId: "banco-stg",
+  // appId: "corner" }` disparava 2 achados HIGH sem nada de Firebase envolvido.
+  // Só vale como Firebase se houver ≥3 chaves do SDK na vizinhança OU
+  // co-ocorrência de authDomain/firebaseapp.com (exclusivos do Firebase).
+  {
+    regex: /(?:apiKey|authDomain|databaseURL|projectId|storageBucket|messagingSenderId|appId|measurementId)\s*[:=]\s*['"`]([^'"`]+)['"`]/gi,
+    label: 'Firebase Config',
+    severity: 'HIGH',
+    confidence: 'weak',
+    validateCtx: (m, source) => {
+      const i = source.indexOf(m);
+      const win = source.slice(Math.max(0, i - 300), i + m.length + 300);
+      if (/authDomain|firebaseapp\.com/i.test(win)) return true;
+      const keys = new Set(
+        (win.match(/\b(?:apiKey|authDomain|databaseURL|projectId|storageBucket|messagingSenderId|appId|measurementId)\b\s*[:=]/gi) || [])
+          .map(s => s.replace(/\s*[:=]\s*$/, '').trim().toLowerCase())
+      );
+      return keys.size >= 3;
+    },
+  },
 
   // Stripe
   { regex: /sk_live_[0-9a-zA-Z]{24,}/g, label: 'Stripe Secret Key (LIVE)', severity: 'CRITICAL', confidence: 'strong' },
@@ -32,8 +52,10 @@ const API_KEY_PATTERNS = [
   // Slack
   { regex: /xox[baprs]-[0-9a-zA-Z-]+/g, label: 'Slack Token', severity: 'CRITICAL', confidence: 'strong' },
 
-  // Twilio
-  { regex: /SK[0-9a-fA-F]{32}/g, label: 'Twilio API Key', severity: 'CRITICAL', confidence: 'strong' },
+  // Twilio — com delimitador de palavra nas duas pontas. Sem isso, o padrão
+  // "SK + 32 hex" casa pedaços de hash de chunk dentro de bundles minificados
+  // (onde esta regra roda, por ser 'strong'), gerando CRITICAL falso.
+  { regex: /\bSK[0-9a-fA-F]{32}\b/g, label: 'Twilio API Key', severity: 'CRITICAL', confidence: 'strong' },
 
   // SendGrid
   { regex: /SG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}/g, label: 'SendGrid API Key', severity: 'CRITICAL', confidence: 'strong' },
@@ -41,9 +63,35 @@ const API_KEY_PATTERNS = [
   // Supabase
   { regex: /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, label: 'Supabase/JWT anon key', severity: 'HIGH', confidence: 'strong' },
 
-  // Chaves genéricas (baseadas em rótulo)
-  { regex: /(?:api[_-]?key|apikey|api[_-]?secret|secret[_-]?key|access[_-]?key|private[_-]?key)\s*[:=]\s*['"`]([A-Za-z0-9_\-/+=]{16,})['"`]/gi, label: 'Chave de API genérica', severity: 'HIGH', confidence: 'weak' },
-  { regex: /(?:password|passwd|pwd)\s*[:=]\s*['"`]([^'"`]{4,})['"`]/gi, label: 'Senha hardcoded', severity: 'CRITICAL', confidence: 'weak' },
+  // Chaves genéricas (baseadas em rótulo). O valor precisa PARECER segredo:
+  // `apiKey: "NEXT_PUBLIC_API_KEY_PLACEHOLDER"` (nome de env var) e outras
+  // strings de baixa entropia casavam a regex e viravam HIGH.
+  {
+    regex: /(?:api[_-]?key|apikey|api[_-]?secret|secret[_-]?key|access[_-]?key|private[_-]?key)\s*[:=]\s*['"`]([A-Za-z0-9_\-/+=]{16,})['"`]/gi,
+    label: 'Chave de API genérica',
+    severity: 'HIGH',
+    confidence: 'weak',
+    validate: (m) => {
+      const v = extractQuotedValue(m);
+      if (!v) return false;
+      if (/^[A-Z0-9_]+$/.test(v)) return false;          // SCREAMING_SNAKE_CASE = nome de env var/placeholder
+      if (/placeholder|example|changeme|your[_-]?key|dummy|sample/i.test(v)) return false;
+      return shannonEntropy(v) > 3.5;                    // segredo real é aleatório; rótulo/slug não é
+    },
+  },
+  // Senha hardcoded. Descarta valores que parecem TEXTO HUMANO: dicionários i18n
+  // e mensagens de validação (`{ password: "Senha inválida" }`) disparavam
+  // CRITICAL só por conterem a chave "password".
+  {
+    regex: /(?:password|passwd|pwd)\s*[:=]\s*['"`]([^'"`]{4,})['"`]/gi,
+    label: 'Senha hardcoded',
+    severity: 'CRITICAL',
+    confidence: 'weak',
+    validate: (m) => {
+      const v = extractQuotedValue(m);
+      return !!v && !looksLikeHumanText(v);
+    },
+  },
 
   // Tokens genéricos em variáveis
   { regex: /(?:const|let|var)\s+\w*(?:token|secret|key|password|apiKey)\w*\s*=\s*['"`]([^'"`]{8,})['"`]/gi, label: 'Token/segredo em variável JS', severity: 'HIGH', confidence: 'weak' },
@@ -108,31 +156,10 @@ export function analyzeSourceCode(source, url, opts = {}) {
     return f;
   };
 
-  // Buscar chaves de API e tokens.
-  // Em código minificado/empacotado, rodar SÓ padrões de alta confiança
-  // (formatos específicos), pois os baseados em rótulo geram falso-positivo.
-  for (const rule of API_KEY_PATTERNS) {
-    if (minified && rule.confidence !== 'strong') continue;
-    const matches = source.match(rule.regex);
-    if (!matches) continue;
-
-    const seen = new Set();
-    for (const match of matches) {
-      if (rule.validate && !rule.validate(match)) continue; // valida user:senha@host real
-      if (seen.has(match)) continue;
-      seen.add(match);
-      if (seen.size > 5) break; // limitar a 5 ocorrências distintas
-
-      findings.push(tag({
-        type: 'exposed_key',
-        severity: rule.severity,
-        label: rule.label,
-        match: maskMatch(match),
-        url,
-        risk: `${rule.label} exposta no código-fonte do frontend. Qualquer pessoa pode ver via DevTools > Sources. Bots automatizados varrem repositórios e sites buscando esse padrão.`,
-        recommendation: 'Mover para variáveis de ambiente no backend. Usar proxy/BFF para chamadas a APIs externas. NUNCA expor chaves secretas no frontend.',
-      }));
-    }
+  // Buscar chaves de API e tokens (lógica extraída para scanForSecrets, que
+  // também é reusada por fetchAndAnalyzeSourceMap para escanear sourcesContent).
+  for (const f of scanForSecrets(source, url, { minified })) {
+    findings.push(tag(f));
   }
 
   // Regras baseadas em rótulo (role, código perigoso) só fazem sentido em
@@ -182,6 +209,9 @@ export function analyzeSourceCode(source, url, opts = {}) {
       severity: 'LOW',
       label: 'Source map exposto',
       match: smMatch[1].slice(0, 80),
+      // Valor cru, sem truncar — `match` é só para exibição; quem for baixar o
+      // .map de verdade (fetchAndAnalyzeSourceMap) precisa da URL completa.
+      mapUrl: smMatch[1],
       url,
       risk: 'O script referencia um source map (.map) externo. Se acessível, ele expõe o código-fonte original (não minificado), com comentários e lógica interna, facilitando a análise por atacantes.',
       recommendation: 'Não publicar arquivos .map em produção, ou restringir o acesso (apenas ambiente interno/observabilidade).',
@@ -233,32 +263,329 @@ export function analyzeInlineScripts(html, url, opts = {}) {
     findings.push(...scriptFindings);
   }
 
-  // Script tags com src externo sem integrity (SRI)
+  // Script tags com src externo sem integrity (SRI).
+  //
+  // Três correções em relação à versão antiga:
+  //  1. `url` do finding era a PÁGINA, não o script. A classificação automática
+  //     em auditor.mjs resolve thirdParty pelo `f.url` → SRI ausente do Google
+  //     Tag Manager era contabilizado como problema do CLIENTE (1ª parte).
+  //     Agora gravamos `url: src` e classificamos pelo `src`.
+  //  2. Script same-origin com URL absoluta não é "externo": SRI ali não protege
+  //     de nada (é o mesmo servidor que serve a página). Esses são ignorados.
+  //  3. Severidade LOW e um ÚNICO finding por grupo, não N. Para tags de conteúdo
+  //     dinâmico (GTM/analytics) o hash muda a cada publicação e SRI é
+  //     inexequível — a mitigação real é CSP + confiança no fornecedor.
   const externalScriptRegex = /<script[^>]+src\s*=\s*['"]([^'"]+)['"][^>]*>/gi;
+  const sriGroups = new Map(); // 'first'|'third' → { scripts:[], vendors:Set }
+  let pageHost = '';
+  try { pageHost = new URL(url).host; } catch { /* url pode não ser absoluta */ }
+
   while ((match = externalScriptRegex.exec(html)) !== null) {
     const fullTag = match[0];
-    const src = match[1];
+    const rawSrc = match[1];
+    if (fullTag.includes('integrity')) continue;
 
-    // Ignorar scripts locais
-    if (src.startsWith('/') || src.startsWith('./') || src.startsWith('../')) continue;
+    // Resolver contra a página: cobre caminho relativo e protocol-relative
+    // (`//cdn.x.com/a.js`), que o filtro antigo `startsWith('/')` descartava
+    // por engano mesmo sendo um CDN externo.
+    let abs;
+    try { abs = new URL(rawSrc, url); } catch { continue; }
+    if (!/^https?:$/.test(abs.protocol)) continue;      // data:/blob: não têm SRI
+    if (pageHost && abs.host === pageHost) continue;     // same-origin → SRI é inútil
 
-    if (!fullTag.includes('integrity')) {
-      findings.push({
-        type: 'missing_sri',
-        severity: 'MEDIUM',
-        label: 'Script externo sem Subresource Integrity (SRI)',
-        src,
-        url,
-        risk: 'Script externo carregado sem verificação de integridade. Se o CDN/servidor externo for comprometido, código malicioso será executado na sua página.',
-        recommendation: 'Adicionar atributo integrity="sha384-..." e crossorigin="anonymous" em todos os scripts externos.',
-      });
+    const { thirdParty, vendor } = classifyResource(abs.href, url);
+    const bucket = thirdParty ? 'third' : 'first';
+    if (!sriGroups.has(bucket)) sriGroups.set(bucket, { scripts: [], vendors: new Set() });
+    const g = sriGroups.get(bucket);
+    if (g.scripts.includes(abs.href)) continue;
+    g.scripts.push(abs.href);
+    if (vendor) g.vendors.add(vendor);
+  }
+
+  for (const [bucket, g] of sriGroups) {
+    const isThird = bucket === 'third';
+    findings.push({
+      type: 'missing_sri',
+      severity: 'LOW',
+      thirdParty: isThird,
+      vendor: isThird ? (Array.from(g.vendors).join(', ') || 'Terceiro') : null,
+      label: `Script${g.scripts.length > 1 ? 's' : ''} externo${g.scripts.length > 1 ? 's' : ''} sem Subresource Integrity (SRI)${isThird ? ' — 3ª parte' : ''}`,
+      src: g.scripts[0],
+      scripts: g.scripts,
+      occurrences: g.scripts.length,
+      url: g.scripts[0],  // URL do SCRIPT (usada pela classificação 1ª/3ª parte)
+      pageUrl: url,
+      risk: `${g.scripts.length} script(s) carregado(s) de origem externa sem verificação de integridade: ${g.scripts.slice(0, 8).join(', ')}${g.scripts.length > 8 ? ' …' : ''}. Se o CDN/servidor externo for comprometido, código malicioso é executado na página.`,
+      recommendation: isThird
+        ? 'Para bibliotecas versionadas em CDN, fixar integrity="sha384-..." + crossorigin="anonymous". Para tags de conteúdo dinâmico (Google Tag Manager, analytics), SRI NÃO é aplicável — o arquivo muda sem aviso; mitigar com CSP (script-src com allowlist) e revisão do fornecedor.'
+        : 'Adicionar integrity="sha384-..." e crossorigin="anonymous" nos scripts servidos por origem externa sob seu controle (ex.: CDN próprio).',
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Baixa e analisa um source map (.map) referenciado por um script.
+ *
+ * Diferente da detecção passiva `source_map_exposed` (que só confirma que a
+ * REFERÊNCIA `//# sourceMappingURL=...` existe no fim do script), esta função
+ * efetivamente busca o arquivo .map e lê `sourcesContent[]` — que tipicamente
+ * contém o código-fonte ORIGINAL não minificado (comentários, nomes reais de
+ * variável, chaves que o build ofusca, rotas internas de API).
+ *
+ * Segue o princípio central do projeto: falha de rede/parse/status não-2xx é
+ * "não verificado", NUNCA um achado. Só gera finding com evidência positiva
+ * (conteúdo do .map efetivamente lido).
+ *
+ * @param {import('@playwright/test').APIRequestContext} request - context.request do Playwright.
+ * @param {string} mapUrl - valor cru da referência sourceMappingURL (pode ser relativo).
+ * @param {string} scriptUrl - URL absoluta do script que referenciou o .map (usada para
+ *   resolver mapUrl relativo e como base do rótulo dos achados).
+ * @param {object} [opts]
+ * @param {boolean} [opts.thirdParty] - script é de terceiro? (repassado aos findings)
+ * @param {string|null} [opts.vendor] - nome do fornecedor, se thirdParty.
+ * @returns {Promise<object[]>} findings novos (pode ser array vazio; nunca lança).
+ */
+export async function fetchAndAnalyzeSourceMap(request, mapUrl, scriptUrl, opts = {}) {
+  const findings = [];
+  const thirdParty = !!opts.thirdParty;
+  const vendor = opts.vendor || null;
+  const tag = (f) => {
+    f.thirdParty = thirdParty;
+    if (vendor) f.vendor = vendor;
+    return f;
+  };
+
+  // Resolver mapUrl relativo contra a URL do script (ex.: "app.js.map" vira
+  // "https://site.com/static/app.js.map" quando scriptUrl é
+  // "https://site.com/static/app.js").
+  let absMapUrl;
+  try {
+    absMapUrl = new URL(mapUrl, scriptUrl).href;
+  } catch {
+    return findings; // mapUrl/scriptUrl inválidos → sem evidência, sem achado
+  }
+
+  // Baixar com timeout de 8s. Qualquer falha (rede, WAF, timeout, 404, 5xx)
+  // é ausência de evidência — não afirma nada, só não gera achado.
+  let res;
+  try {
+    res = await request.get(absMapUrl, { maxRedirects: 0, timeout: 8000, failOnStatusCode: false });
+  } catch {
+    return findings;
+  }
+  if (!res || res.status() < 200 || res.status() >= 300) return findings;
+
+  let body = '';
+  try {
+    body = await res.text();
+  } catch {
+    return findings;
+  }
+  if (!body) return findings;
+
+  let map;
+  try {
+    map = JSON.parse(body);
+  } catch {
+    return findings; // não é JSON válido → não é um source map de verdade
+  }
+  if (!map || typeof map !== 'object') return findings;
+
+  const sources = Array.isArray(map.sources) ? map.sources : [];
+  const sourcesContent = Array.isArray(map.sourcesContent) ? map.sourcesContent : null;
+  const hasRealContent = !!sourcesContent && sourcesContent.some(
+    (c) => typeof c === 'string' && c.trim().length > 0
+  );
+
+  if (hasRealContent) {
+    // Escanear CADA entrada de sourcesContent com os mesmos padrões de segredo
+    // usados no código normal. Custo limitado: no máximo 50 arquivos e 200KB
+    // por arquivo (source maps de app grande podem ter centenas de módulos e
+    // arquivos de dezenas de MB — sem teto isso vira DoS de CPU/memória no
+    // próprio auditor).
+    const MAX_ENTRIES = 50;
+    const MAX_CHARS_PER_ENTRY = 200_000;
+    const secretFindings = [];
+    for (let i = 0; i < sourcesContent.length && i < MAX_ENTRIES; i++) {
+      const content = sourcesContent[i];
+      if (typeof content !== 'string' || !content.trim()) continue;
+      const truncated = content.length > MAX_CHARS_PER_ENTRY
+        ? content.slice(0, MAX_CHARS_PER_ENTRY)
+        : content;
+      const srcName = sources[i] || `source[${i}]`;
+      // sourcesContent é sempre código-fonte ORIGINAL (não minificado) —
+      // minified:false para não pular os padrões 'weak' baseados em rótulo.
+      const found = scanForSecrets(truncated, `${scriptUrl} (source map: ${srcName})`, { minified: false });
+      for (const f of found) secretFindings.push(tag(f));
     }
+
+    // A severidade do achado "conteúdo exposto" acompanha o pior segredo
+    // encontrado dentro dele (mesma severidade que o achado de segredo normal
+    // já usaria) — senão fica MEDIUM (código-fonte revelado, mas sem segredo
+    // confirmado pelos padrões).
+    const worstSeverity = secretFindings.reduce(
+      (worst, f) => (severityRank(f.severity) > severityRank(worst) ? f.severity : worst),
+      'MEDIUM'
+    );
+    const exampleFiles = sources.filter((s, i) => typeof sourcesContent[i] === 'string' && sourcesContent[i].trim()).slice(0, 10);
+
+    findings.push(tag({
+      type: 'source_map_content_exposed',
+      severity: worstSeverity,
+      label: 'Source map expõe código-fonte original',
+      url: absMapUrl,
+      scriptUrl,
+      sourceCount: sources.length,
+      exampleFiles,
+      occurrences: sourcesContent.filter((c) => typeof c === 'string' && c.trim()).length,
+      risk: `O source map contém ${exampleFiles.length}+ arquivo(s) de código-fonte ORIGINAL não minificado (${exampleFiles.slice(0, 5).join(', ')}${exampleFiles.length > 5 ? ', …' : ''}), incluindo comentários, nomes reais de variável/função e lógica de negócio que o build normalmente oculta.${secretFindings.length ? ' Segredo(s) real(is) foram encontrados dentro do código-fonte revelado — ver achados relacionados.' : ''}`,
+      recommendation: 'Não publicar arquivos .map (ou sourcesContent) em produção. Se necessário para observabilidade, restringir acesso ao .map por autenticação/rede interna, ou gerar o map sem sourcesContent (só mapeamento de posição, sem o texto original).',
+    }));
+
+    findings.push(...secretFindings);
+  } else if (sources.length > 0) {
+    // Source map existe e resolve, mas sem sourcesContent embutido — achado
+    // mais brando: "existe mas não vaza conteúdo" (ainda revela a árvore de
+    // arquivos originais, útil para reconhecimento, mas não o código em si).
+    findings.push(tag({
+      type: 'source_map_content_exposed',
+      severity: 'LOW',
+      label: 'Source map acessível sem código-fonte embutido',
+      url: absMapUrl,
+      scriptUrl,
+      sourceCount: sources.length,
+      occurrences: 1,
+      risk: `O .map foi baixado com sucesso e lista ${sources.length} arquivo(s) de origem, mas sem "sourcesContent" — o código-fonte original não está embutido. Ainda assim revela nomes/estrutura de arquivos internos.`,
+      recommendation: 'Idealmente não publicar .map em produção. Se publicado, a ausência de sourcesContent já reduz o risco de vazamento de código, mas os nomes de arquivo ainda ajudam reconhecimento.',
+    }));
+  }
+
+  // Nomes de arquivo em sources[] que parecem rotas de API/paths internos —
+  // achado INFO separado (é informação de reconhecimento, não segredo).
+  const routeHints = [];
+  for (const s of sources) {
+    if (typeof s !== 'string' || !s) continue;
+    if (looksLikeInternalRoute(s)) routeHints.push(s);
+    if (routeHints.length >= 15) break; // teto para não inflar o relatório
+  }
+  if (routeHints.length > 0) {
+    findings.push(tag({
+      type: 'source_map_internal_routes',
+      severity: 'INFO',
+      label: 'Paths internos/rotas de API revelados pelo source map',
+      url: absMapUrl,
+      scriptUrl,
+      paths: routeHints,
+      occurrences: routeHints.length,
+      risk: 'O source map revela nomes de arquivo que sugerem rotas de API ou módulos internos (ex.: /api/, /internal/, /admin/, /routes/), ajudando um atacante a mapear a superfície de ataque do backend sem precisar de força-bruta.',
+      recommendation: 'Não publicar .map em produção. Alternativamente, evitar nomes de arquivo/pasta que revelem estrutura interna sensível do backend.',
+    }));
   }
 
   return findings;
 }
 
 // ─── Helpers ───────────────────────────────────────────────
+
+/**
+ * Escaneia um texto (código-fonte JS legível ou minificado) em busca de
+ * chaves/segredos usando API_KEY_PATTERNS. Extraído de analyzeSourceCode para
+ * ser reusado também no conteúdo original revelado por source maps
+ * (fetchAndAnalyzeSourceMap). Não aplica thirdParty/vendor — quem chama tagueia.
+ */
+function scanForSecrets(source, url, { minified = false } = {}) {
+  const findings = [];
+  // Em código minificado/empacotado, rodar SÓ padrões de alta confiança
+  // (formatos específicos), pois os baseados em rótulo geram falso-positivo.
+  for (const rule of API_KEY_PATTERNS) {
+    if (minified && rule.confidence !== 'strong') continue;
+    const matches = source.match(rule.regex);
+    if (!matches) continue;
+
+    const seen = new Set();
+    for (const match of matches) {
+      if (rule.validate && !rule.validate(match)) continue;              // valida o match isolado
+      if (rule.validateCtx && !rule.validateCtx(match, source)) continue; // valida com a vizinhança no arquivo
+      if (seen.has(match)) continue;
+      seen.add(match);
+      if (seen.size > 5) break; // limitar a 5 ocorrências distintas
+
+      findings.push({
+        type: 'exposed_key',
+        severity: rule.severity,
+        label: rule.label,
+        match: maskMatch(match),
+        url,
+        risk: `${rule.label} exposta no código-fonte do frontend. Qualquer pessoa pode ver via DevTools > Sources. Bots automatizados varrem repositórios e sites buscando esse padrão.`,
+        recommendation: 'Mover para variáveis de ambiente no backend. Usar proxy/BFF para chamadas a APIs externas. NUNCA expor chaves secretas no frontend.',
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Ranking numérico de severidade para comparação (maior = mais grave).
+ */
+function severityRank(sev) {
+  const order = { INFO: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+  return order[sev] ?? 0;
+}
+
+/**
+ * Heurística: o path de um arquivo de source map "parece" uma rota de API ou
+ * módulo interno (não claramente componente de UI)? Usada só para o achado
+ * INFO source_map_internal_routes — não afeta severidade de segredo nenhum.
+ */
+function looksLikeInternalRoute(path) {
+  if (/\/api\/|\/internal\/|\/admin\/|\/routes\//i.test(path)) return true;
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 3) return false;
+  // Extensão/pasta típica de componente de UI → não conta como "rota interna".
+  if (/\.(vue|jsx|tsx|css|scss|less|svg|png|jpg|jpeg|gif|json)$/i.test(path)) return false;
+  if (/\/(components?|pages?|views?|assets?|styles?|public|static)\//i.test(path)) return false;
+  return true;
+}
+
+/**
+ * Extrai o último valor entre aspas do match (é sempre o lado direito do
+ * `chave: "valor"`). As regras usam `source.match(regex)` com /g, que devolve o
+ * match inteiro e não o grupo de captura — por isso reextraímos aqui.
+ */
+function extractQuotedValue(match) {
+  const m = String(match).match(/['"`]([^'"`]*)['"`]\s*$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Entropia de Shannon em bits por caractere. Segredo real (token/hash) fica
+ * acima de ~4; slug, nome de env var e palavra do dicionário ficam abaixo de 3.5.
+ */
+function shannonEntropy(str) {
+  if (!str) return 0;
+  const freq = new Map();
+  for (const ch of str) freq.set(ch, (freq.get(ch) || 0) + 1);
+  let h = 0;
+  for (const n of freq.values()) {
+    const p = n / str.length;
+    h -= p * Math.log2(p);
+  }
+  return h;
+}
+
+/**
+ * O valor parece texto humano / placeholder em vez de credencial?
+ * Evita o pior falso-positivo do arquivo: dicionário i18n e mensagem de
+ * validação (`password: "Senha inválida"`, `password: "Campo obrigatório"`)
+ * eram reportados como senha hardcoded CRITICAL.
+ */
+function looksLikeHumanText(value) {
+  if (/\s/.test(value)) return true;                 // segredo não tem espaço
+  if (/[À-ÿ]/.test(value)) return true;              // acento = frase em pt/es/fr
+  return /^(senha|password|required|obrigat|\*+|xxx|changeme|<.*>|\{\{|%s|\$\{)/i.test(value);
+}
 
 function maskMatch(match) {
   if (match.length <= 12) return '***';

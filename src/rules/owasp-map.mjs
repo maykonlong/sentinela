@@ -3,8 +3,17 @@
  * Usado no relatório para dar linguagem de mercado e priorização (Tier 4).
  *
  * confiança:
- *   'confirmado' = checagem determinística (header/cookie/lib/tls/rede observada)
- *   'provável'   = heurística/regex que pode ter falso-positivo (código, roles)
+ *   'confirmado'  = checagem determinística (header/cookie/lib/tls/DNS/rede observada)
+ *   'provável'    = heurística/regex que pode ter falso-positivo (código, roles)
+ *   'informativo' = achado de inventário (severity INFO); não é vulnerabilidade,
+ *                   é contexto/prova de coleta. Só renderizado como texto.
+ *
+ * REGRA DE OURO: todo `type:` produzido por src/rules/, src/infra/ ou
+ * src/auditor.mjs precisa estar em MAP. O DEFAULT abaixo existe só como rede de
+ * segurança para o relatório não quebrar — ele NÃO deve ser atingido em produção,
+ * porque marca tudo como 'provável' e apagava a confiança de checagens
+ * determinísticas (SPF/DMARC/CAA são fato binário do DNS, não palpite).
+ * O teste `test/owasp-map-coverage.mjs` falha se algum type escapar daqui.
  */
 
 const MAP = {
@@ -49,6 +58,12 @@ const MAP = {
   cookie_insecure_flags:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-614 / CWE-1004', confidence: 'confirmado' },
   cookie_sensitive_no_httponly: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1004', confidence: 'confirmado' },
   source_map_exposed:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-540', confidence: 'confirmado' },
+  // source_map_content_exposed: severidade escala com o que foi achado dentro
+  // (pode chegar a segredo real, daí 'provável' — só é 'confirmado' quando o
+  // finding tem evidência de segredo, mas o campo de confiança aqui é o piso).
+  source_map_content_exposed: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-540', confidence: 'provável' },
+  source_map_internal_routes: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  cookie_missing_secure_prefix: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1004', confidence: 'provável' },
   cache_control_sensitive:    { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-525', confidence: 'confirmado' },
   target_blank_noopener:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1022', confidence: 'confirmado' },
   http_method_enabled:        { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-650', confidence: 'confirmado' },
@@ -58,9 +73,15 @@ const MAP = {
 
   // A06 – Vulnerable and Outdated Components
   vulnerable_library:         { owasp: 'A06:2021 – Vulnerable and Outdated Components', cwe: 'CWE-1104', confidence: 'confirmado' },
+  // Mesma categoria do achado hardcoded acima, mas via consulta viva ao
+  // OSV.dev — CVE catalogada de verdade, não heurística de regex.
+  vulnerable_library_osv:     { owasp: 'A06:2021 – Vulnerable and Outdated Components', cwe: 'CWE-1104', confidence: 'confirmado' },
 
   // A01 – Broken Access Control (IDOR/BOLA, access diff, open redirect)
   idor_suspected:             { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-639', confidence: 'provável' },
+  // Diferente do suspected: veio de uma 2ª conta real acessando o objeto da
+  // 1ª — prova, não heurística de troca de ID.
+  idor_confirmed:             { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-639', confidence: 'confirmado' },
   broken_access_control:      { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-284', confidence: 'provável' },
   privilege_escalation:       { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-285', confidence: 'provável' },
   open_redirect:              { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-601', confidence: 'confirmado' },
@@ -89,11 +110,105 @@ const MAP = {
 
   // A08 – Software and Data Integrity Failures
   missing_sri:                { owasp: 'A08:2021 – Software and Data Integrity Failures', cwe: 'CWE-353', confidence: 'confirmado' },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // DNS / e-mail — checagens 100% determinísticas (registro existe ou não).
+  // Ficavam no DEFAULT e saíam como 'provável', subestimando achados que são
+  // fato verificável com um `dig`.
+  // ───────────────────────────────────────────────────────────────────────────
+  missing_spf_record:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-290', confidence: 'confirmado' },
+  missing_dmarc_record:       { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-290', confidence: 'confirmado' },
+  missing_caa_record:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-295', confidence: 'confirmado' },
+  missing_ptr_record:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: '—',       confidence: 'confirmado' },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // LGPD / Privacidade — penalizavam a nota na categoria `lgpd` mas apareciam
+  // sem OWASP/CWE no relatório. Como a base legal é mais forte que o CWE aqui,
+  // cada um cita o artigo da Lei 13.709/2018 no campo `lgpd`.
+  // ───────────────────────────────────────────────────────────────────────────
+  missing_privacy_policy:     { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-359', confidence: 'confirmado', lgpd: 'LGPD Art. 9º — transparência sobre o tratamento' },
+  missing_form_optin:         { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-359', confidence: 'confirmado', lgpd: 'LGPD Art. 8º — consentimento livre e informado' },
+  cookie_consent_violation:   { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-359', confidence: 'confirmado', lgpd: 'LGPD Art. 8º — consentimento prévio a cookies não essenciais' },
+  pii_in_url:                 { owasp: 'A02:2021 – Cryptographic Failures',    cwe: 'CWE-598', confidence: 'confirmado', lgpd: 'LGPD Art. 46 — segurança no tratamento' },
+  pii_in_url_value:           { owasp: 'A02:2021 – Cryptographic Failures',    cwe: 'CWE-598', confidence: 'confirmado', lgpd: 'LGPD Art. 46 — segurança no tratamento' },
+  pii_in_storage:             { owasp: 'A02:2021 – Cryptographic Failures',    cwe: 'CWE-922', confidence: 'confirmado', lgpd: 'LGPD Art. 46 — segurança no tratamento' },
+  pii_in_storage_value:       { owasp: 'A02:2021 – Cryptographic Failures',    cwe: 'CWE-922', confidence: 'confirmado', lgpd: 'LGPD Art. 46 — segurança no tratamento' },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Infra / rede exposta
+  // ───────────────────────────────────────────────────────────────────────────
+  exposed_port:               { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-1327', confidence: 'confirmado' },
+  ip_blacklisted:             { owasp: 'A05:2021 – Security Misconfiguration', cwe: '—',        confidence: 'confirmado' },
+  cloud_bucket_detected:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200',  confidence: 'provável' },
+  graphql_introspection_enabled: { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  insecure_websocket:         { owasp: 'A02:2021 – Cryptographic Failures',    cwe: 'CWE-319',  confidence: 'confirmado' },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Autenticação / sessão (A07) e segredos em trânsito (A02)
+  // ───────────────────────────────────────────────────────────────────────────
+  cross_origin_auth:          { owasp: 'A07:2021 – Identification and Authentication Failures', cwe: 'CWE-346', confidence: 'confirmado' },
+  login_password_visible:     { owasp: 'A07:2021 – Identification and Authentication Failures', cwe: 'CWE-549', confidence: 'confirmado' },
+  password_autocomplete:      { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  login_password_autocomplete:{ owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-200', confidence: 'confirmado' },
+  form_get_sensitive:         { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-598', confidence: 'confirmado' },
+  login_form_get:             { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-598', confidence: 'confirmado' },
+  login_password_in_url:      { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-598', confidence: 'confirmado' },
+  login_forgot_password_http: { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-319', confidence: 'confirmado' },
+  sensitive_in_body:          { owasp: 'A02:2021 – Cryptographic Failures', cwe: 'CWE-359', confidence: 'provável' },
+
+  // A09 – Logging: erro de JS no console vaza stack/rota interna ao usuário final.
+  console_error:              { owasp: 'A09:2021 – Security Logging and Monitoring Failures', cwe: 'CWE-532', confidence: 'confirmado' },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Inventário (severity INFO) — não são vulnerabilidades: são a PROVA de que a
+  // coleta rodou. Precisam existir aqui para não caírem no DEFAULT e aparecerem
+  // no relatório como "Diversos / provável", o que sugere problema onde não há.
+  // ───────────────────────────────────────────────────────────────────────────
+  cookie_inventory:            { owasp: 'Inventário — evidência de coleta', cwe: '—', confidence: 'informativo' },
+  storage_inventory:           { owasp: 'Inventário — evidência de coleta', cwe: '—', confidence: 'informativo' },
+  auth_header_detected:        { owasp: 'Inventário — evidência de coleta', cwe: '—', confidence: 'informativo' },
+  login_cookie_added:          { owasp: 'Inventário — diff de login',       cwe: '—', confidence: 'informativo' },
+  login_cookie_removed:        { owasp: 'Inventário — diff de login',       cwe: '—', confidence: 'informativo' },
+  login_storage_added:         { owasp: 'Inventário — diff de login',       cwe: '—', confidence: 'informativo' },
+  login_storage_changed:       { owasp: 'Inventário — diff de login',       cwe: '—', confidence: 'informativo' },
+  login_storage_removed:       { owasp: 'Inventário — diff de login',       cwe: '—', confidence: 'informativo' },
+  login_form_action:           { owasp: 'Inventário — contexto do login',   cwe: '—', confidence: 'informativo' },
+  login_no_form_tag:           { owasp: 'Inventário — contexto do login',   cwe: '—', confidence: 'informativo' },
+  login_password_no_name:      { owasp: 'Inventário — contexto do login',   cwe: '—', confidence: 'informativo' },
+  login_password_example_placeholder: { owasp: 'Inventário — contexto do login', cwe: '—', confidence: 'informativo' },
 };
 
 const DEFAULT = { owasp: 'Diversos / Boas práticas', cwe: '—', confidence: 'provável' };
 
-/** Retorna {owasp, cwe, confidence} para um finding. */
+/**
+ * Types que aparecem como `type:` no código mas NÃO são achados — são entradas
+ * de timeline/UI (`auditTimeline.push({..., type: 'info' })`). O scanner de
+ * cobertura precisa ignorá-los, senão exige mapeamento OWASP para um ícone.
+ */
+export const NON_FINDING_TYPES = new Set(['info', 'success', 'warn', 'error', 'warning']);
+
+/** Lista (ordenada) de todos os types com mapeamento OWASP/CWE explícito. */
+export function listMappedTypes() {
+  return Object.keys(MAP).sort();
+}
+
+/** true se o type tem mapeamento explícito (i.e. não cai no DEFAULT). */
+export function isMapped(type) {
+  return Object.prototype.hasOwnProperty.call(MAP, type);
+}
+
+/**
+ * Dada uma lista de types observados, devolve os que cairiam no DEFAULT.
+ * Usado por test/owasp-map-coverage.mjs para transformar o fallback silencioso
+ * (que hoje esconde achados reais) em falha de teste.
+ */
+export function findUnmappedTypes(types) {
+  return [...new Set(types)]
+    .filter(t => t && !NON_FINDING_TYPES.has(t) && !isMapped(t))
+    .sort();
+}
+
+/** Retorna {owasp, cwe, confidence, lgpd} para um finding. */
 export function mapFinding(finding) {
   const base = MAP[finding.type] || DEFAULT;
   // Confiança pode ser reforçada: chave de formato específico é confirmada.
@@ -101,5 +216,7 @@ export function mapFinding(finding) {
   if (finding.type === 'exposed_key' && /AWS|Google|Stripe|GitHub|Slack|Twilio|SendGrid|credenciais/i.test(finding.label || '')) {
     confidence = 'confirmado';
   }
-  return { owasp: base.owasp, cwe: base.cwe, confidence };
+  // `lgpd` é opcional (só nos achados com base legal direta) e ADITIVO: quem
+  // consome só {owasp, cwe, confidence} continua funcionando igual.
+  return { owasp: base.owasp, cwe: base.cwe, confidence, lgpd: base.lgpd || null };
 }
