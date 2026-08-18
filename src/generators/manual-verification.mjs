@@ -141,15 +141,20 @@ const VERIFICATION_MAP = {
   }),
 
   // ── Portas ──
-  exposed_port: (f) => ({
-    title: `Verificar porta ${f.port} (${f.service})`,
-    steps: [
-      `Executar: \`telnet ${f.url ? new URL(f.url).hostname : 'hostname'} ${f.port}\``,
-      `Se conectar, a porta está aberta publicamente.`,
-      `Verificar no firewall se a porta deve estar acessível pela internet.`,
-    ],
-    automated: `nc -zv ${f.url ? new URL(f.url).hostname : 'hostname'} ${f.port} 2>&1`,
-  }),
+  exposed_port: (f) => {
+    const host = f.host || (f.url ? (() => { try { return new URL(f.url).hostname; } catch { return f.url; } })() : null) || '10.x.x.x';
+    return {
+      title: `Verificar porta ${f.port} (${f.service})`,
+      steps: [
+        `Executar: \`nc -zv ${host} ${f.port}\``,
+        `Se a resposta for "Connection to ${host} ${f.port} port [tcp/*] succeeded!", a porta está ABERTA.`,
+        `Se for "Connection refused", está FECHADA (correto).`,
+        `Verificar no firewall do servidor se a porta ${f.port} deve ser acessível externamente.`,
+      ],
+      devtools: `Não aplicável — verificação de porta é feita via terminal.`,
+      automated: `nc -zv ${host} ${f.port} 2>&1`,
+    };
+  },
 
   // ── CORS ──
   cors_wildcard: (f) => ({
