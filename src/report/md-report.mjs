@@ -108,13 +108,17 @@ export function generateEnterpriseMd({
     }
 
     const openPorts = (tcp.ports || []).filter(p => p.state === 'OPEN');
+    const targetHost = geo.ip || timing.ip || '10.4.0.20';
     if (openPorts.length > 0) {
-      lines.push('### 🔌 Portas TCP Abertas');
+      lines.push('### 🔌 Portas TCP Abertas (Risco & Recomendações)');
       lines.push('');
-      lines.push('| Porta | Serviço | Latência |');
-      lines.push('|------:|---------|--------:|');
+      lines.push('| Porta | Serviço | Latência | Nível | Risco & Por Quê | Recomendação de Proteção | Comando de Teste |');
+      lines.push('|------:|---------|--------:|-------|-----------------|--------------------------|------------------|');
       for (const p of openPorts) {
-        lines.push(`| ${p.port} | ${p.service} | ${p.latency_ms}ms |`);
+        const testCmd = p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000
+          ? `\`curl -skD - "http${p.port === 443 || p.port === 8443 ? 's' : ''}://${targetHost}:${p.port}"\``
+          : `\`nc -vv -w 3 ${targetHost} ${p.port}\``;
+        lines.push(`| **${p.port}** | ${p.service} | ${p.latency_ms}ms | **${p.severity || 'LOW'}** | ${p.risk || 'Superfície de ataque exposta.'} | ${p.recommendation || 'Fechar no firewall se não utilizada.'} | ${testCmd} |`);
       }
       lines.push('');
     }

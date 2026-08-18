@@ -260,23 +260,35 @@ export function generateEnterpriseHtml({
       <p style="font-size:11px;color:#868e96;text-align:center">Total: ${timing.total_ms}ms · ${timing.total_bytes ? (timing.total_bytes / 1024).toFixed(1) + ' KB' : ''}</p>
     ` : `<p style="color:#c92a2a">⚠️ Medição de timing falhou${timing.error ? ': ' + esc(timing.error) : ''}</p>`;
 
-    // Portas abertas com botões interativos de teste/cópia
+    // Portas abertas com botões interativos, risco detalhado e recomendação
     const openPorts = (tcp.ports || []).filter(p => p.state === 'OPEN');
     const targetHost = geo.ip || timing.ip || '10.4.0.20';
     const portTableHtml = openPorts.length > 0 ? `
       <table class="port-table">
-        <thead><tr><th>Porta</th><th>Serviço</th><th>Estado</th><th>Latência</th><th>Ação de Teste</th></tr></thead>
+        <thead>
+          <tr>
+            <th style="width:70px">Porta</th>
+            <th style="width:130px">Serviço</th>
+            <th style="width:80px">Nível</th>
+            <th>Risco & Por Quê</th>
+            <th>Recomendação de Proteção</th>
+            <th style="width:130px">Ação de Teste</th>
+          </tr>
+        </thead>
         <tbody>${openPorts.map(p => {
           const testCmd = p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000
             ? `curl -skD - "http${p.port === 443 || p.port === 8443 ? 's' : ''}://${targetHost}:${p.port}" -o /dev/null`
             : `nc -vv -w 3 ${targetHost} ${p.port}`;
+          const sev = p.severity || 'LOW';
+          const sevBg = SEV_COLOR[sev] || '#868e96';
           return `<tr>
           <td><strong>${p.port}</strong></td>
-          <td>${esc(p.service)}</td>
-          <td class="port-open">OPEN</td>
-          <td>${p.latency_ms}ms</td>
+          <td>${esc(p.service)}<br><span style="font-size:10px;color:#868e96">${p.latency_ms}ms</span></td>
+          <td><span class="pill" style="background:${sevBg}">${sev}</span></td>
+          <td style="font-size:12px;color:#495057;line-height:1.4">${esc(p.risk || 'Superfície de ataque exposta.')}</td>
+          <td style="font-size:12px;color:#2b5c34;line-height:1.4">${esc(p.recommendation || 'Fechar no firewall se não for estritamente necessária.')}</td>
           <td>
-            <button class="btn-action" onclick="copyText('${esc(testCmd)}', this)">📋 Copiar Teste (${p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000 ? 'curl' : 'nc'})</button>
+            <button class="btn-action" onclick="copyText('${esc(testCmd)}', this)">📋 Testar (${p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000 ? 'curl' : 'nc'})</button>
           </td>
         </tr>`;
         }).join('')}</tbody>

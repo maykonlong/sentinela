@@ -104,6 +104,70 @@ async function confirmPort(host, port, firstLatency) {
 }
 
 /**
+ * Retorna gravidade, risco detalhado e recomendação de segurança para qualquer porta TCP.
+ */
+export function getPortSecurityAdvice(port, service) {
+  const isDb = [3306, 5432, 27017, 1433, 9200, 11211].includes(port);
+  const isCache = [6379, 11211].includes(port);
+  const isRemote = [22, 23, 3389].includes(port);
+  const isWebApp = [3000, 5000, 8000, 8888, 9000].includes(port);
+  const isWebStandard = [80, 443, 8080, 8443].includes(port);
+  const isMail = [21, 25, 110, 143, 465, 587, 993, 995].includes(port);
+
+  if (isDb) {
+    return {
+      severity: 'HIGH',
+      risk: `A porta ${port} (${service}) é um banco de dados exposto publicamente. Permite força bruta em senhas de admin e exfiltração/injeção de dados.`,
+      recommendation: `Bloquear porta ${port} no firewall externo. Permitir conexões apenas via bind 127.0.0.1 ou rede privada interna / VPN.`,
+    };
+  }
+  if (isCache) {
+    return {
+      severity: 'HIGH',
+      risk: `A porta ${port} (${service}) é um serviço de cache exposto. Caches sem autenticação permitem leitura/escrita de sessões e roubo de dados.`,
+      recommendation: `Fechar a porta ${port} no firewall público. Configurar bind 127.0.0.1 e exigir senha de autenticação (requirepass).`,
+    };
+  }
+  if (isRemote) {
+    return {
+      severity: 'MEDIUM',
+      risk: `A porta ${port} (${service}) é um acesso remoto exposto na internet. Alvo constante de robôs de força bruta e exploração de ransomware.`,
+      recommendation: `Restringir acesso à porta ${port} por IP no firewall (whitelist). Exigir chave SSH (sem senha) ou acesso via VPN.`,
+    };
+  }
+  if (isWebApp) {
+    return {
+      severity: 'MEDIUM',
+      risk: `A porta ${port} (${service}) é um app/ambiente de desenvolvimento exposto diretamente, sem camada de WAF, rate limit ou TLS nativo.`,
+      recommendation: `Colocar um Reverse Proxy (Nginx / Cloudflare) na frente da aplicação e bloquear o acesso externo direto à porta ${port}.`,
+    };
+  }
+  if (isMail) {
+    return {
+      severity: 'LOW',
+      risk: `A porta ${port} (${service}) é um serviço de e-mail/transferência exposto. Pode ser alvo de relay de spam se sem autenticação forte.`,
+      recommendation: `Exigir autenticação forte, desabilitar portas legadas não criptografadas e impor TLS obrigatório.`,
+    };
+  }
+  if (isWebStandard) {
+    return {
+      severity: 'INFO',
+      risk: port === 80
+        ? `Porta HTTP pública. Tráfego não criptografado transmite credenciais/cookies em texto claro.`
+        : `Porta Web padrão exposta para tráfego HTTPS/HTTP.`,
+      recommendation: port === 80
+        ? `Configurar redirecionamento automático 301 de HTTP para HTTPS (porta 443) e ativar o cabeçalho HSTS.`
+        : `Manter certificados TLS atualizados e aplicar cabeçalhos de segurança (CSP, HSTS, X-Content-Type-Options).`,
+    };
+  }
+  return {
+    severity: 'LOW',
+    risk: `A porta ${port} (${service}) está aberta publicamente e expande a superfície de ataque do servidor.`,
+    recommendation: `Avaliar se a porta ${port} precisa estar aberta externamente. Fechar portas desnecessárias no firewall.`,
+  };
+}
+
+/**
  * Escaneia as portas enterprise de forma concorrente.
  * @param {string} host - IP ou hostname do alvo
  * @param {number[]} [customPorts] - Lista customizada de portas (opcional)
@@ -127,12 +191,26 @@ export async function scanTcpPorts(host, customPorts) {
     }));
   }
 
-  // Montar resultados finais com dupla confirmação aplicada
+  // Montar resultados finais com dupla confirmação e conselho de segurança aplicado
   const results = firstPass.map(r => {
+    let finalState = r.state;
+    let finalLatency = r.latency_ms;
+    let isConfirmed = false;
     if (confirmations[r.port]) {
-      return { ...r, state: confirmations[r.port].state, latency_ms: confirmations[r.port].latency_ms, confirmed: true };
+      finalState = confirmations[r.port].state;
+      finalLatency = confirmations[r.port].latency_ms;
+      isConfirmed = true;
     }
-    return r;
+    const advice = getPortSecurityAdvice(r.port, r.service);
+    return {
+      ...r,
+      state: finalState,
+      latency_ms: finalLatency,
+      confirmed: isConfirmed,
+      severity: advice.severity,
+      risk: advice.risk,
+      recommendation: advice.recommendation,
+    };
   });
 
   const openPorts = results.filter(r => r.state === 'OPEN');
@@ -145,34 +223,19 @@ export async function scanTcpPorts(host, customPorts) {
   for (const r of openPorts) {
     if (!DANGEROUS_PORTS.has(r.port)) continue;
 
-    const isDb = [3306, 5432, 27017, 1433, 9200, 11211].includes(r.port);
-    const isCache = [6379, 11211].includes(r.port);
-    const isRemote = [22, 23, 3389].includes(r.port);
-
+    const advice = getPortSecurityAdvice(r.port, r.service);
     findings.push({
       type: 'exposed_port',
-      severity: isDb || isCache ? 'HIGH' : 'MEDIUM',
+      severity: advice.severity,
       thirdParty: false,
       label: `Porta ${r.port} (${r.service}) aberta`,
       port: r.port,
       service: r.service,
-      host,                            // ← incluir host para verificação manual correta
+      host,
       latency_ms: r.latency_ms,
       confirmed: r.confirmed || false,
-      risk: isDb
-        ? `A porta ${r.port} (${r.service}) está aberta publicamente. Bancos de dados não devem ser acessíveis pela internet — expõe dados a ataques de força bruta, injeção e exfiltração.`
-        : isCache
-        ? `A porta ${r.port} (${r.service}) está aberta publicamente. Caches sem autenticação (Redis, Memcached) podem ser lidos/escritos por qualquer pessoa, expondo dados sensíveis e permitindo envenenamento de cache.`
-        : isRemote
-        ? `A porta ${r.port} (${r.service}) está aberta publicamente. Serviços de acesso remoto expostos são alvo constante de força bruta automatizada.`
-        : `A porta ${r.port} (${r.service}) está aberta e pode representar superfície de ataque desnecessária.`,
-      recommendation: isDb
-        ? `Fechar a porta ${r.port} no firewall para acesso externo. Usar conexão via VPN, SSH tunnel ou rede privada. Se necessário acesso externo, exigir autenticação forte e TLS.`
-        : isCache
-        ? `Fechar a porta ${r.port} no firewall. Redis/Memcached devem escutar apenas em localhost (bind 127.0.0.1). Habilitar autenticação (requirepass no Redis).`
-        : isRemote
-        ? `Restringir acesso à porta ${r.port} por IP no firewall (whitelist). Usar chave SSH ao invés de senha. Considerar fail2ban para proteção contra brute force.`
-        : `Avaliar se a porta ${r.port} precisa estar aberta. Fechar portas desnecessárias reduz a superfície de ataque.`,
+      risk: advice.risk,
+      recommendation: advice.recommendation,
     });
   }
 
@@ -184,3 +247,4 @@ export async function scanTcpPorts(host, customPorts) {
     findings,
   };
 }
+
