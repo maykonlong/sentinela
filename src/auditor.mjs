@@ -36,6 +36,7 @@ import { measureLoadPercentiles } from './infra/load-percentiles.mjs';
 import { lookupGeoIP } from './infra/geoip.mjs';
 import { checkDnsblReputation } from './infra/dnsbl-reputation.mjs';
 import { analyzeSocialCards } from './infra/social-cards.mjs';
+import { analyzeDnsSecurity } from './infra/dns-scanner.mjs';
 
 // Geradores de testes e verificação manual
 import { generateTestArtifacts } from './generators/test-generator.mjs';
@@ -2087,15 +2088,16 @@ async function main() {
 
   const infraPromise = (async () => {
     try {
-      console.log(chalk.gray('  🔌 Escaneando portas TCP, socket timing, GeoIP e reputação...'));
+      console.log(chalk.gray('  🔌 Escaneando portas TCP, registros DNS, socket timing, GeoIP e reputação...'));
       const timing = await measureSocketTiming(targetUrl).catch(() => ({ status: 'FAIL' }));
       const ip = timing.ip || '';
       
-      const [tcpScan, geoip, reputation, loadPercentiles] = await Promise.all([
+      const [tcpScan, geoip, reputation, loadPercentiles, dnsSecurity] = await Promise.all([
         scanTcpPorts(targetHost).catch(() => ({ ports: [], findings: [] })),
         lookupGeoIP(ip).catch(() => ({ status: 'INFO' })),
         checkDnsblReputation(ip, targetHost).catch(() => ({ is_blacklisted: false, findings: [] })),
         measureLoadPercentiles(targetUrl, 10, 5).catch(() => ({ percentiles: null })),
+        analyzeDnsSecurity(targetUrl).catch(() => ({ status: 'INFO', records: {}, findings: [] })),
       ]);
 
       const socialCards = analyzeSocialCards(pageHtmlContent, targetUrl);
@@ -2107,6 +2109,7 @@ async function main() {
         reputation,
         loadPercentiles,
         socialCards,
+        dnsSecurity,
       };
     } catch (e) {
       console.log(chalk.gray(`  (infra check falhou: ${e.message})`));
@@ -2140,6 +2143,11 @@ async function main() {
       const repFindings = infraData.reputation.findings.map(f => ({ ...f, phase: 'PRÉ-LOGIN' }));
       repFindings.forEach(logFinding);
       allFindings.push(...repFindings);
+    }
+    if (infraData.dnsSecurity?.findings?.length > 0) {
+      const dnsFindings = infraData.dnsSecurity.findings.map(f => ({ ...f, phase: 'PRÉ-LOGIN' }));
+      dnsFindings.forEach(logFinding);
+      allFindings.push(...dnsFindings);
     }
     console.log(chalk.green(`  🏗️ Infraestrutura auditada: IP ${infraData.geoip?.ip || '?'}, ${infraData.tcpScan?.open_count || 0} portas abertas, timing ${infraData.socketTiming?.total_ms || 0}ms`));
   }

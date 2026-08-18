@@ -250,6 +250,37 @@ export function generateEnterpriseHtml({
       <p style="font-size:11px;color:#868e96;margin-top:8px">${load.total_requests} requisições · ${load.success_rate_pct}% sucesso · min ${load.min_ms}ms · max ${load.max_ms}ms · avg ${load.average_ms}ms</p>
     ` : '';
 
+    // Registros DNS de Segurança
+    const dnsSec = infraData.dnsSecurity || {};
+    const dnsSum = dnsSec.summary || {};
+    const dnsRecs = dnsSec.records || {};
+
+    const dnsSecHtml = !dnsSec.isIp && dnsSec.status ? `
+      <h3>🛡️ Registros DNS de Segurança & E-mail</h3>
+      <div class="infra-grid" style="margin-bottom:12px">
+        <div class="infra-card">
+          <div class="ic-label">SPF (Anti-Spoofing)</div>
+          <div class="ic-value" style="color:${dnsSum.has_spf ? '#2f9e44' : '#f08c00'}">${dnsSum.has_spf ? '✅ Configurado' : '⚠️ Ausente'}</div>
+          ${dnsRecs.SPF ? `<div style="font-size:10px;color:#495057;word-break:break-all;margin-top:4px"><code>${esc(dnsRecs.SPF)}</code></div>` : ''}
+        </div>
+        <div class="infra-card">
+          <div class="ic-label">DMARC (Anti-Phishing)</div>
+          <div class="ic-value" style="color:${dnsSum.has_dmarc ? '#2f9e44' : '#f08c00'}">${dnsSum.has_dmarc ? '✅ Configurado' : '⚠️ Ausente'}</div>
+          ${dnsRecs.DMARC ? `<div style="font-size:10px;color:#495057;word-break:break-all;margin-top:4px"><code>${esc(dnsRecs.DMARC)}</code></div>` : ''}
+        </div>
+        <div class="infra-card">
+          <div class="ic-label">CAA (Autorização de CA)</div>
+          <div class="ic-value" style="color:${dnsSum.has_caa ? '#2f9e44' : '#f08c00'}">${dnsSum.has_caa ? '✅ Configurado' : '⚠️ Sem Restrição'}</div>
+          ${dnsRecs.CAA && dnsRecs.CAA.length ? `<div style="font-size:10px;color:#495057;margin-top:4px"><code>${esc(dnsRecs.CAA.join(', '))}</code></div>` : ''}
+        </div>
+        <div class="infra-card">
+          <div class="ic-label">IPv6 (Suporte AAAA)</div>
+          <div class="ic-value" style="color:${dnsSum.has_ipv6 ? '#2f9e44' : '#868e96'}">${dnsSum.has_ipv6 ? '✅ Habilitado' : 'ℹ️ Somente IPv4'}</div>
+          ${dnsRecs.AAAA && dnsRecs.AAAA.length ? `<div style="font-size:10px;color:#495057;margin-top:4px"><code>${esc(dnsRecs.AAAA[0])}</code></div>` : ''}
+        </div>
+      </div>
+    ` : '';
+
     infraHtml = `
     <div class="section">
       <h2>🏗️ Infraestrutura</h2>
@@ -262,6 +293,8 @@ export function generateEnterpriseHtml({
         <div class="infra-card"><div class="ic-label">Organização</div><div class="ic-value">${esc(geo.organization || '—')}</div></div>
         <div class="infra-card"><div class="ic-label">Reputação IP</div><div class="ic-value" style="color:${rep.is_blacklisted ? '#c92a2a' : '#2f9e44'}">${rep.is_blacklisted ? '❌ Blacklisted' : '✅ Limpo'}</div></div>
       </div>
+
+      ${dnsSecHtml}
 
       <h3>⚡ Latência por Fase (Socket)</h3>
       ${timingBarHtml}

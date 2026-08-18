@@ -80,6 +80,19 @@ export function generateEnterpriseMd({
     lines.push(`- **Reputação IP:** ${rep.is_blacklisted ? '❌ Blacklisted (' + (rep.blacklists_flagged || []).join(', ') + ')' : '✅ Limpo'}`);
     lines.push('');
 
+    const dnsSec = infraData.dnsSecurity || {};
+    if (!dnsSec.isIp && dnsSec.status) {
+      const sum = dnsSec.summary || {};
+      const recs = dnsSec.records || {};
+      lines.push('### 🛡️ Registros DNS de Segurança & E-mail');
+      lines.push('');
+      lines.push(`- **SPF (Anti-Spoofing):** ${sum.has_spf ? '✅ Configurado (`' + recs.SPF + '`)' : '⚠️ Ausente (Risco de Email Spoofing)'}`);
+      lines.push(`- **DMARC (Anti-Phishing):** ${sum.has_dmarc ? '✅ Configurado (`' + recs.DMARC + '`)' : '⚠️ Ausente (Sem política de rejeição)'}`);
+      lines.push(`- **CAA (Autorização de CA):** ${sum.has_caa ? '✅ Configurado (`' + (recs.CAA || []).join(', ') + '`)' : '⚠️ Sem Restrição (Qualquer CA pública pode emitir)'}`);
+      lines.push(`- **IPv6 (Suporte AAAA):** ${sum.has_ipv6 ? '✅ Habilitado (`' + recs.AAAA[0] + '`)' : 'ℹ️ Somente IPv4'}`);
+      lines.push('');
+    }
+
     if (timing.status === 'PASS') {
       lines.push('### ⚡ Latência por Fase');
       lines.push('');

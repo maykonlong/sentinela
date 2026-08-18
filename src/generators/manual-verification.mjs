@@ -274,6 +274,55 @@ const VERIFICATION_MAP = {
   },
 
   // ════════════════════════════════════════════════════
+  // REGISTROS DNS DE SEGURANÇA
+  // ════════════════════════════════════════════════════
+
+  missing_spf_record: (f, targetUrl) => {
+    const host = f.host || hostname(f, targetUrl);
+    return {
+      title: `Validação & Prova Real para Registro SPF no DNS`,
+      steps: [
+        `1. Teste focado: Consultar registros TXT do domínio ${host} e buscar "v=spf1".`,
+        `2. PROVA REAL: Listar TODOS os registros TXT do domínio para confirmar a ausência da política SPF.`,
+      ],
+      devtools: `Terminal / CLI (nslookup / dig / PowerShell).`,
+      automated: `nslookup -type=TXT ${host} | grep -i "v=spf1"`,
+      proofOfWork: `powershell -NoProfile -Command "Resolve-DnsName ${host} -Type TXT | ConvertTo-Json"`,
+      online: `https://mxtoolbox.com/spf.aspx?domain=${host}`,
+    };
+  },
+
+  missing_dmarc_record: (f, targetUrl) => {
+    const host = f.host || hostname(f, targetUrl);
+    return {
+      title: `Validação & Prova Real para Registro DMARC no DNS`,
+      steps: [
+        `1. Teste focado: Consultar registro TXT em _dmarc.${host}.`,
+        `2. PROVA REAL: Exibir todos os registros retornado em _dmarc.${host} e confirmar a ausência da política "v=DMARC1".`,
+      ],
+      devtools: `Terminal / CLI (nslookup / dig / PowerShell).`,
+      automated: `nslookup -type=TXT _dmarc.${host} | grep -i "v=DMARC1"`,
+      proofOfWork: `powershell -NoProfile -Command "Resolve-DnsName _dmarc.${host} -Type TXT | ConvertTo-Json"`,
+      online: `https://mxtoolbox.com/dmarc.aspx?domain=${host}`,
+    };
+  },
+
+  missing_caa_record: (f, targetUrl) => {
+    const host = f.host || hostname(f, targetUrl);
+    return {
+      title: `Validação & Prova Real para Registro CAA no DNS`,
+      steps: [
+        `1. Teste focado: Consultar registros CAA do domínio ${host}.`,
+        `2. PROVA REAL: Listar todas as respostas CAA. Se a lista retornar vazia, a ausência de restrição de CAs está confirmada.`,
+      ],
+      devtools: `Terminal / CLI (nslookup / dig / PowerShell).`,
+      automated: `powershell -NoProfile -Command "Resolve-DnsName ${host} -Type CAA"`,
+      proofOfWork: `powershell -NoProfile -Command "Resolve-DnsName ${host} -Type CAA -Server 8.8.8.8 | ConvertTo-Json"`,
+      online: `https://sslmate.com/caa/check/${host}`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
   // PORTAS TCP
   // ════════════════════════════════════════════════════
 
