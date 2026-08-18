@@ -1,52 +1,78 @@
 @echo off
-chcp 65001 >nul
-title Sentinela - Vulnerability Collector
-cd /d "%~dp0"
+chcp 65001 > nul
+title Sentinela v2.1 — Security Auditor
 
 echo.
-echo  ============================================================
-echo    SENTINELA  -  Vulnerability Collector
-echo  ============================================================
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║              SENTINELA v2.1 — Security Auditor           ║
+echo ╠══════════════════════════════════════════════════════════╣
+echo ║                                                          ║
+echo ║  Comandos disponíveis:                                   ║
+echo ║                                                          ║
+echo ║  1. Iniciar auditoria (navegação manual + ATIVO)         ║
+echo ║  2. Iniciar auditoria (só login)                         ║
+echo ║  3. Iniciar auditoria (crawl automático)                 ║
+echo ║  4. Finalizar sessão atual                               ║
+echo ║  5. Ver status da sessão                                 ║
+echo ║  6. Listar todas as sessões                              ║
+echo ║  7. Sair                                                 ║
+echo ║                                                          ║
+echo ╚══════════════════════════════════════════════════════════╝
 echo.
 
-REM Verifica se o Node esta instalado
-where node >nul 2>nul
-if errorlevel 1 (
-  echo  [ERRO] Node.js nao encontrado no PATH.
-  echo         Instale o Node.js e tente novamente.
-  echo.
-  pause
-  exit /b 1
-)
+set /p CHOICE="Escolha uma opção [1-7]: "
 
-REM Instala dependencias na primeira execucao
-if not exist "node_modules" (
-  echo  Primeira execucao: instalando dependencias...
-  call npm install
-  echo.
-)
+if "%CHOICE%"=="1" goto START_ACTIVE
+if "%CHOICE%"=="2" goto START_LOGIN
+if "%CHOICE%"=="3" goto START_CRAWL
+if "%CHOICE%"=="4" goto DONE
+if "%CHOICE%"=="5" goto STATUS
+if "%CHOICE%"=="6" goto SESSIONS
+if "%CHOICE%"=="7" goto EXIT
+goto EXIT
 
-:pedir_url
-set "URL="
-set /p "URL=  Cole a URL do alvo e tecle ENTER:  "
-
-if not defined URL (
-  echo  Nenhuma URL informada. Tente de novo.
-  echo.
-  goto pedir_url
-)
-
+:START_ACTIVE
+set /p URL="URL alvo (ex: https://10.4.0.20:8443/login): "
 echo.
-echo  Iniciando auditoria em: %URL%
-echo  (o programa vai perguntar o MODO a seguir)
+echo ✅ Abrindo Edge. Faça login e navegue pelas páginas.
+echo    Para finalizar: rode iniciar.bat → opção 4
+echo    Ou: http://localhost:3141 → botão Finalizar
 echo.
-
-REM Roda o auditor. Como e um terminal real, ele pergunta o modo/escopo.
-node src\auditor.mjs "%URL%"
-
-echo.
-echo  ============================================================
-echo    Auditoria finalizada. Relatorios em:  reports\
-echo  ============================================================
-echo.
+node sentinela.mjs start %URL% --active
 pause
+goto EXIT
+
+:START_LOGIN
+set /p URL="URL alvo: "
+echo.
+node sentinela.mjs start %URL% --login-only --active
+pause
+goto EXIT
+
+:START_CRAWL
+set /p URL="URL alvo: "
+echo.
+node sentinela.mjs start %URL% --crawl --active
+pause
+goto EXIT
+
+:DONE
+echo.
+node sentinela.mjs done
+pause
+goto EXIT
+
+:STATUS
+echo.
+node sentinela.mjs status
+pause
+goto EXIT
+
+:SESSIONS
+echo.
+node sentinela.mjs sessions
+pause
+goto EXIT
+
+:EXIT
+exit

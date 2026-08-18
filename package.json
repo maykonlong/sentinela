@@ -1,16 +1,20 @@
 {
   "name": "sentinela",
-  "version": "2.0.0",
-  "description": "Sentinela — Enterprise Security Auditor & Vulnerability Collector (Playwright + Infra Diagnostics)",
+  "version": "2.1.0",
+  "description": "Sentinela — Enterprise Security Auditor v2.1 (Sessões Persistentes + Daemon + Relatórios Completos)",
 
   "type": "module",
   "bin": {
-    "sentinela": "src/auditor.mjs"
+    "sentinela": "sentinela.mjs"
   },
   "scripts": {
-    "audit": "node src/auditor.mjs",
-    "audit:crawl": "node src/auditor.mjs --crawl",
-    "audit:active": "node src/auditor.mjs --active"
+    "start":         "node sentinela.mjs start",
+    "done":          "node sentinela.mjs done",
+    "status":        "node sentinela.mjs status",
+    "sessions":      "node sentinela.mjs sessions",
+    "audit":         "node src/auditor.mjs",
+    "audit:crawl":   "node src/auditor.mjs --crawl",
+    "audit:active":  "node src/auditor.mjs --active"
   },
   "dependencies": {
     "playwright": "^1.48.0",

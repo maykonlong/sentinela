@@ -123,6 +123,61 @@ let pageHtmlContent = '';             // HTML da primeira página (para social c
 let currentPhase = 'pre-login'; // 'pre-login' | 'login' | 'post-login'
 let pageOrigin = '';
 
+// ─── Session Hooks (injetados pelo daemon) ──────────────────
+// Quando rodando via daemon, estes hooks gravam cada finding/rota/screenshot
+// em disco imediatamente — garantindo que nada seja perdido em caso de crash.
+let _sessionHooks = null;
+
+/**
+ * Configura hooks de sessão para persistência contínua em disco.
+ * Chamado pelo daemon antes de iniciar a auditoria.
+ * @param {object} hooks - { onFinding, onRoute, onScreenshot, onTimeline, onInfra, onBrowserDisconnect }
+ */
+export function setSessionHooks(hooks) {
+  _sessionHooks = hooks;
+}
+
+// Wrapper de allFindings.push que também notifica o daemon
+const _origFindingsPush = allFindings.push.bind(allFindings);
+allFindings.push = function (...items) {
+  const result = _origFindingsPush(...items);
+  if (_sessionHooks?.onFinding) items.forEach(f => _sessionHooks.onFinding(f));
+  return result;
+};
+
+// Wrapper de capturedRoutes.push que também notifica o daemon
+const _origRoutesPush = capturedRoutes.push.bind(capturedRoutes);
+capturedRoutes.push = function (...items) {
+  const result = _origRoutesPush(...items);
+  if (_sessionHooks?.onRoute) items.forEach(r => _sessionHooks.onRoute(r));
+  return result;
+};
+
+/**
+ * Exportação para uso pelo daemon.
+ * Quando chamado diretamente (node auditor.mjs), usa o fluxo normal.
+ * Quando importado pelo daemon, aceita hooks e finalizePromise.
+ */
+export async function runAudit(url, opts = {}, hooks = null, finalizePromise = null) {
+  // Sobrescrever args globais para o modo programático
+  if (url) { process.argv[2] = url; }
+  if (opts.scope === 'login') process.argv.push('--login-only', '--yes');
+  else if (opts.scope === 'crawl') process.argv.push('--crawl', '--yes');
+  else process.argv.push('--yes');
+  if (opts.activeMode) process.argv.push('--active');
+
+  if (hooks) setSessionHooks(hooks);
+  if (finalizePromise) {
+    // Quando finalizePromise resolve, sinalizar para o main() encerrar
+    finalizePromise.then(() => {
+      // Simular ENTER para desbloquear o readline (modo navegação)
+      process.stdin.push('\n');
+    });
+  }
+
+  await main();
+}
+
 // Snapshots para comparação before/after login
 let storageSnapshotBefore = { localStorage: {}, sessionStorage: {} };
 let cookieSnapshotBefore = [];
@@ -2529,9 +2584,12 @@ function deduplicateFindings(findings) {
   });
 }
 
-// Executar
-main().catch(err => {
-  console.error(chalk.red(`\n❌ Erro fatal: ${err.message}`));
-  console.error(err.stack);
-  process.exit(1);
-});
+// Executar apenas se for o script principal (não quando importado pelo daemon)
+const isMain = process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('auditor.mjs');
+if (isMain) {
+  main().catch(err => {
+    console.error(chalk.red(`\n❌ Erro fatal: ${err.message}`));
+    console.error(err.stack);
+    process.exit(1);
+  });
+}
