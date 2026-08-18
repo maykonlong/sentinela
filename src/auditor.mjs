@@ -204,7 +204,6 @@ export async function runAudit(url, opts = {}, hooks = null, finalizePromise = n
 // Snapshots para comparação before/after login
 let storageSnapshotBefore = { localStorage: {}, sessionStorage: {} };
 let cookieSnapshotBefore = [];
-let auditTimeline = [];
 
 function addTimeline(text, type = 'info') {
   const time = new Date().toLocaleTimeString('pt-BR');
@@ -1729,6 +1728,7 @@ function issueToFinding(issue) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
+  auditTimeline.length = 0;
   parseConfiguration();
   printBanner();
 
