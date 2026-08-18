@@ -455,10 +455,23 @@ export function generateEnterpriseHtml({
           <span class="cmd cmd-pow">${esc(mv.proofOfWork)}</span>
           <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar Dump</button>
         </div>` : ''}
-        <div style="margin-top:8px;padding:8px 10px;background:#e7f5ff;border-left:3px solid #1c7ed6;border-radius:4px;font-size:12px;color:#1864ab">
-          <b>💡 Como Apresentar a Prova ao Gestor/Diretoria:</b><br>
-          • <b>Se o comando retornar o dado/header ou "succeeded":</b> A falha é <b>REAL E CONFIRMADA</b>. O atacante consegue visualizar/explorar este item diretamente.<br>
-          • <b>Se o comando retornar vazio ou "Connection refused":</b> O item foi <b>CORRIGIDO/PROTEGIDO</b> com sucesso.
+        <div style="margin-top:10px;padding:12px 14px;background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #1c7ed6;border-radius:6px;font-size:12px;color:#343a40">
+          <div style="font-weight:700;color:#1c7ed6;margin-bottom:6px;font-size:12px">
+            💡 Resumo Executivo da Prova (Para Gestão & Diretoria)
+          </div>
+          <div style="line-height:1.5">
+            <b>📌 O que este teste comprova:</b> Valida diretamente se o risco <b>"${esc(f.label || f.type)}"</b> está ativo no ambiente ou se já foi protegido.<br>
+            <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:8px">
+              <div style="background:#fff5f5;border:1px solid #ffc9c9;padding:8px 10px;border-radius:6px;color:#c92a2a">
+                <b>🔴 Se Vulnerável (Ambiente em Risco):</b><br>
+                O comando/script exibe o dado exposto ou conexão liberada ("succeeded"). Prova que o atacante tem acesso direto a este vetor.
+              </div>
+              <div style="background:#ebfbee;border:1px solid #b2f2bb;padding:8px 10px;border-radius:6px;color:#2b5c34">
+                <b>🟢 Se Corrigido (Ambiente Protegido):</b><br>
+                O comando retorna vazio, "Connection refused" ou confirmação de bloqueio. Prova que a remediação foi concluída com sucesso.
+              </div>
+            </div>
+          </div>
         </div>
       </div>` : ''}
     </div>`;
