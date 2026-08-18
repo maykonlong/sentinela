@@ -104,17 +104,34 @@ const VERIFICATION_MAP = {
     };
   },
 
-  cookie_sensitive_no_httponly: (f) => ({
-    title: `Validação & Prova Real para HttpOnly no Cookie "${f.cookieName}"`,
-    steps: [
-      `1. Teste via Console: Abrir F12 → Console e cole o snippet fornecido.`,
-      `2. PROVA REAL: Se o cookie "${f.cookieName}" for retornado, ele NÃO TEM a proteção HttpOnly (vazio se seguro).`,
-    ],
-    devtools: `F12 → Application → Cookies → "${f.cookieName}" → coluna HttpOnly.`,
-    consoleSnippet: `document.cookie.split('; ').filter(c => c.startsWith('${f.cookieName}='))`,
-    automated: `curl -skD - "${f.url || 'https://10.4.0.20:8443'}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
-    proofOfWork: `curl -skD - "${f.url || 'https://10.4.0.20:8443'}" -o /dev/null | grep -i "Set-Cookie"`,
-  }),
+  cookie_sensitive_no_httponly: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para HttpOnly no Cookie "${f.cookieName}"`,
+      steps: [
+        `1. Teste via Console: Abrir F12 → Console e cole o snippet fornecido.`,
+        `2. PROVA REAL: Se o cookie "${f.cookieName}" for retornado, ele NÃO TEM a proteção HttpOnly (vazio se seguro).`,
+      ],
+      devtools: `F12 → Application → Cookies → "${f.cookieName}" → coluna HttpOnly.`,
+      consoleSnippet: `document.cookie.split('; ').filter(c => c.startsWith('${f.cookieName}='))`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie"`,
+    };
+  },
+
+  cookie_missing_secure_prefix: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Prefixo de Cookie em "${f.cookieName}"`,
+      steps: [
+        `1. Teste focado: ver o Set-Cookie do cookie e confirmar que o NOME não começa com __Host- ou __Secure-.`,
+        `2. PROVA REAL: dump completo dos cookies — o browser REJEITA sozinho qualquer __Host-/__Secure- malformado, então a mera presença do prefixo já seria a prova de conformidade; a ausência é o que este achado sinaliza (hardening recomendado, não falha confirmada).`,
+      ],
+      devtools: `F12 → Application → Cookies → linha "${f.cookieName}" → coluna Name.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie"`,
+    };
+  },
 
   // ════════════════════════════════════════════════════
   // STORAGE
@@ -179,17 +196,25 @@ const VERIFICATION_MAP = {
   },
 
   missing_sri: (f, targetUrl) => {
-    const url = sanitizeUrl(f.url, targetUrl);
+    // ATENÇÃO ao campo usado: neste achado `f.url` é o SCRIPT (o recurso sem
+    // integrity), não a página. Para procurar a tag `<script>` é preciso baixar
+    // o HTML da PÁGINA — daí o `f.pageUrl`. Usar `f.url` aqui faria o curl
+    // baixar o próprio .js e o grep por "<script" nunca casar, dando a falsa
+    // impressão de que o problema não existe.
+    const pageUrl = sanitizeUrl(f.pageUrl || targetUrl, targetUrl);
+    const scriptUrl = sanitizeUrl(f.url, targetUrl);
+    const alvo = f.src || scriptUrl || 'script';
     return {
       title: `Validação & Prova Real para SRI`,
       steps: [
-        `1. Teste focado: Buscar a tag script no HTML.`,
-        `2. PROVA REAL: Imprimir todas as tags script externas e verificar quais possuem o atributo \`integrity\`.`,
+        `1. Teste focado: baixar o HTML da página e procurar a tag do script sem \`integrity\`.`,
+        `2. PROVA REAL: listar TODAS as tags <script> da página — se elas aparecem mas nenhuma tem \`integrity\`, a ausência está confirmada.`,
+        `   → Se o comando 2 voltar vazio ou der erro, é problema de conexão/URL, não ausência de SRI.`,
       ],
       devtools: `F12 → Elements → Ctrl+F → buscar o arquivo script.`,
       consoleSnippet: `Array.from(document.scripts).filter(s => s.src && !s.integrity).map(s => s.src)`,
-      automated: `curl -sk "${url}" | grep -i "${f.src || 'script'}"`,
-      proofOfWork: `curl -sk "${url}" | grep -iE "<script"`,
+      automated: `curl -sk "${pageUrl}" | grep -i "${alvo}"`,
+      proofOfWork: `curl -sk "${pageUrl}" | grep -iE "<script"`,
       online: `https://www.srihash.org/`,
     };
   },
@@ -330,21 +355,6 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
   // PORTAS TCP
   // ════════════════════════════════════════════════════
-
-  exposed_port: (f, targetUrl) => {
-    const host = f.host || hostname(f, targetUrl);
-    return {
-      title: `Validação & Prova Real para Porta ${f.port} (${f.service})`,
-      steps: [
-        `1. Teste focado: Tentar handshake TCP com netcat/nc.`,
-        `2. PROVA REAL: Teste de banner grab / resposta de protocolo. Se conectar e responder banner, a exposição é 100% CONFIRMADA.`,
-      ],
-      devtools: `Terminal / CLI.`,
-      automated: `nc -zv ${host} ${f.port} 2>&1`,
-      proofOfWork: `nc -vv -w 3 ${host} ${f.port} 2>&1`,
-      online: `https://www.yougetsignal.com/tools/open-ports/ (inserir IP ${host} e porta ${f.port})`,
-    };
-  },
 
   // ════════════════════════════════════════════════════
   // CORS
@@ -500,15 +510,19 @@ const VERIFICATION_MAP = {
     };
   },
 
-  session_fixation: (f) => ({
-    title: `Validação & Prova Real para Session Fixation`,
-    steps: [
-      `1. Teste focado: Comparar o cookie antes e depois de logar.`,
-      `2. PROVA REAL: Enviar o cookie anônimo no cabeçalho Cookie: e verificar se a sessão autenticada é mantida sob o mesmo identificador.`,
-    ],
-    devtools: `F12 → Application → Cookies (anotar antes e depois).`,
-    automated: `Comparar cookies de sessão antes e depois do login.`,
-  }),
+  session_fixation: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Session Fixation`,
+      steps: [
+        `1. Teste focado: Capturar o valor do cookie "${f.cookieName}" ANTES de logar (execute o comando 1x), fazer login, e capturar de novo (execute 1x mais).`,
+        `2. PROVA REAL: Se o comando 1 e o comando 2 imprimirem o MESMO valor de "${f.cookieName}", a fixação é REAL E CONFIRMADA. O comando de dump completo (sem filtro) confirma que a conexão/resposta está OK caso o filtro volte vazio.`,
+      ],
+      devtools: `F12 → Application → Cookies → anotar o valor de "${f.cookieName}" antes e depois do login.`,
+      automated: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie"`,
+    };
+  },
 
   // ════════════════════════════════════════════════════
   // FORMULÁRIOS
@@ -547,7 +561,7 @@ const VERIFICATION_MAP = {
   },
 
   exposed_port: (f, targetUrl) => {
-    const host = f.host || '10.4.0.20';
+    const host = f.host || hostname(f, targetUrl);
     const port = f.port || 5432;
     const isWeb = [80, 443, 3000, 8000, 8080, 8443].includes(Number(port));
     const testCmd = isWeb 
@@ -609,7 +623,7 @@ const VERIFICATION_MAP = {
       devtools: `F12 → Elements → Ctrl+F → buscar por "privacidade" ou "privacy".`,
       consoleSnippet: `(() => { const links = Array.from(document.querySelectorAll('a[href]')).filter(a => /privacidade|privacy|lgpd/i.test(a.href + a.innerText)); if (links.length) { console.table(links.map(l => ({ texto: l.innerText.trim(), link: l.href }))); return '✅ Política de Privacidade ENCONTRADA no DOM!'; } return '❌ AUSENTE: Nenhum link de Política de Privacidade localizado (Violação LGPD Art. 9º)'; })()`,
       automated: `curl -sk "${url}" | grep -iE "privacidade|privacy|lgpd"`,
-      proofOfWork: `curl -sk "${url}" | grep -n -i "href=" | grep -iE "privacidade|privacy|lgpd"`,
+      proofOfWork: `curl -sk "${url}" | grep -n -i "href="`,
     };
   },
 
@@ -671,6 +685,7 @@ const VERIFICATION_MAP = {
       ],
       devtools: `F12 → Network → verificar URL do GET pós-login.`,
       automated: `curl -skD - "${url}" -o /dev/null | grep -iE "location|referer"`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null`,
     };
   },
 
@@ -696,11 +711,12 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para IDOR`,
       steps: [
-        `1. Teste focado: Substituir o ID na rota pelo ID de outro usuário.`,
-        `2. PROVA REAL: Fazer a requisição com o token/cookie da Conta B acessando os dados da Conta A e comparar os hashes do payload retornado.`,
+        `1. Teste focado: Substituir o ID na rota pelo ID de outro usuário e comparar com a resposta.`,
+        `2. PROVA REAL (Baseline): Rode o comando de dump com o SEU PRÓPRIO cookie contra a URL original — se der erro/vazio aqui, o problema é de conexão/URL, não do teste de IDOR. Compare o tamanho/conteúdo dessa resposta com a obtida no passo 1.`,
       ],
       devtools: `F12 → Network → re-executar requisição trocando ID.`,
       automated: `curl -sk -H "Cookie: SESSION_USUARIO_B" "${url}"`,
+      proofOfWork: `curl -sk -H "Cookie: <cole aqui seu próprio cookie de sessão, copiado do DevTools>" "${url}"`,
     };
   },
 
@@ -770,10 +786,28 @@ const VERIFICATION_MAP = {
       steps: [
         `1. Teste focado: Consultar a versão no Console.`,
         `2. PROVA REAL: Extrair a versão diretamente do cabeçalho do arquivo .js carregado na aba Sources.`,
+        `   → Se o comando 2 baixar o arquivo mas o comando 1 não achar a versão, confirme visualmente no início do arquivo (headers de licença costumam citar a versão).`,
       ],
       devtools: `F12 → Console → verificar versão.`,
       automated: `curl -sk "${url}" | grep -oP "${f.library || 'jquery'}\\/[0-9]+\\.[0-9]+\\.[0-9]+"`,
+      proofOfWork: `curl -sk "${url}" | head -c 300`,
       online: `https://snyk.io/vuln/?q=${encodeURIComponent(f.library || '')}`,
+    };
+  },
+
+  vulnerable_library_osv: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    const ids = Array.isArray(f.osvIds) ? f.osvIds : (f.cve ? String(f.cve).split(';').map(s => s.trim()).filter(Boolean) : []);
+    return {
+      title: `Validação & Prova Real para CVE Catalogada (OSV.dev)`,
+      steps: [
+        `1. Teste focado: confirmar que a versão detectada (${f.version || '?'}) do ${f.library || 'pacote'} realmente está carregada no site.`,
+        `2. PROVA REAL: abrir cada advisory do OSV.dev abaixo — eles trazem o CVSS, os commits/versões afetadas e, na maioria dos casos, um PoC público.`,
+      ],
+      devtools: `F12 → Sources → localizar o arquivo e conferir a versão no cabeçalho/comentário.`,
+      automated: `curl -sk "${url}" | head -c 300`,
+      proofOfWork: `curl -sk "${url}" | grep -oE "${(f.library || '').replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&') || 'version'}[^\\"']{0,30}"`,
+      online: ids.length ? `https://osv.dev/vulnerability/${ids[0]}` : `https://osv.dev/list?q=${encodeURIComponent(f.library || '')}`,
     };
   },
 

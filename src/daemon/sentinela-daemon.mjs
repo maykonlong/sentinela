@@ -99,10 +99,13 @@ function createSessionHooks(sessionId) {
 // ── Crash recovery ────────────────────────────────────────────
 
 /**
- * Verifica se existe sessão IN_PROGRESS e pergunta o que fazer.
- * Retorna: 'resume' | 'report' | 'discard' | null (sem sessão anterior)
+ * Verifica se existe sessão IN_PROGRESS e decide o que fazer.
+ * Retorna: {action:'resume'|'report'|'discard', sessionId} | null (sem sessão anterior)
+ *
+ * @param {string|null} onOrphan - decisão pré-definida ('report'|'resume'|'discard'|'fail').
+ *   Quando informada, NÃO pergunta nada. É o caminho usado por automação/IA.
  */
-async function handleCrashRecovery() {
+async function handleCrashRecovery(onOrphan = null) {
   const active = store.findActiveSession();
   if (!active) return null;
 
@@ -112,6 +115,34 @@ async function handleCrashRecovery() {
   console.log(chalk.white(`   Iniciada: ${new Date(active.startedAt).toLocaleString('pt-BR')} (${elapsed} min atrás)`));
   console.log(chalk.white(`   Achados salvos: ${active.findingsCount} | Rotas: ${active.routesCount}`));
   console.log('');
+
+  // Resolve a decisão sem interação quando ela já foi dada por flag.
+  const decide = (n) => {
+    if (n === 'resume' || n === '2') return { action: 'resume', sessionId: active.id };
+    if (n === 'discard' || n === '3') { store.archiveSession(active.id); return { action: 'discard' }; }
+    if (n === 'fail') {
+      throw new Error(`Sessão ${active.id} está IN_PROGRESS e --on-orphan=fail foi pedido. ` +
+        `Resolva com: node sentinela.mjs report ${active.id} | resume ${active.id} | cancel`);
+    }
+    return { action: 'report', sessionId: active.id };
+  };
+
+  if (onOrphan) {
+    console.log(chalk.gray(`  → --on-orphan=${onOrphan} (sem pergunta)`));
+    return decide(onOrphan);
+  }
+
+  // SEM TTY (rodando em background, via IA, cron, pipe) o stdin já está em EOF:
+  // o callback do readline NUNCA dispara e esta Promise nunca resolve — o
+  // processo fica pendurado para sempre sem nem abrir o browser. Foi exatamente
+  // o que travou uma sessão real. Sem terminal interativo, assume o padrão
+  // seguro e não-destrutivo: gerar relatório com o que já está salvo em disco.
+  if (!process.stdin.isTTY) {
+    console.log(chalk.gray('  → sem terminal interativo: gerando relatório com os dados salvos.'));
+    console.log(chalk.gray('    (use --on-orphan=resume|discard|fail para escolher outro comportamento)'));
+    return decide('report');
+  }
+
   console.log(chalk.cyan('O que deseja fazer?'));
   console.log(chalk.white('  [1] Gerar relatório com os dados salvos (sem reabrir browser)'));
   console.log(chalk.white('  [2] Retomar auditoria (reabrir browser na mesma sessão)'));
@@ -121,24 +152,34 @@ async function handleCrashRecovery() {
   const { createInterface } = await import('readline');
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
+    // Rede de segurança: se o stdin fechar sem resposta (ex.: pipe encerrado),
+    // resolve no padrão em vez de pendurar o processo.
+    let done = false;
+    const finish = (fn) => { if (done) return; done = true; rl.close(); try { fn(); } catch (e) { reject(e); } };
+
+    rl.on('close', () => { if (!done) { done = true; try { resolve(decide('report')); } catch (e) { reject(e); } } });
     rl.question('Escolha [1/2/3]: ', answer => {
-      rl.close();
-      const n = answer.trim();
-      if (n === '2') resolve({ action: 'resume', sessionId: active.id });
-      else if (n === '3') { store.archiveSession(active.id); resolve({ action: 'discard' }); }
-      else resolve({ action: 'report', sessionId: active.id });
+      finish(() => resolve(decide(answer.trim())));
     });
   });
 }
 
 // ── Geração de relatório a partir da sessão ───────────────────
 
-async function generateFromSession(sessionId) {
+export async function generateFromSession(sessionId) {
   const session = store.loadSession(sessionId);
   if (!session) throw new Error(`Sessão ${sessionId} não encontrada`);
 
-  const { meta, findings, routes, timeline, screenshotPaths, infra } = session;
+  const { meta, routes, timeline, screenshotPaths, infra } = session;
+
+  // findings.ndjson guarda o fluxo BRUTO: um achado por resposta HTTP. Sem
+  // deduplicar, o mesmo "Sem COOP" vira 27 achados (um por URL) e infla
+  // contagem, nota, HTML e artefatos de teste. O caminho do auditor ao vivo já
+  // deduplicava; este aqui não — e as duas rotas produziam números diferentes
+  // para a MESMA sessão (351 vs 41). Fonte única: src/report/dedup.mjs.
+  const { deduplicateFindings } = await import('../report/dedup.mjs');
+  const findings = deduplicateFindings(session.findings);
 
   // Carregar screenshots como base64
   const screenshots = screenshotPaths.map(p => {
@@ -166,7 +207,7 @@ async function generateFromSession(sessionId) {
     if (!f.confidence) f.confidence = m.confidence;
   }
 
-  const enriched = enrichWithVerification(findings);
+  const enriched = enrichWithVerification(findings, meta.target);
   const firstParty = enriched.filter(f => !f.thirdParty);
   const thirdParty = enriched.filter(f => f.thirdParty);
   const firstPartyIssues = firstParty.filter(f => f.severity !== 'INFO');
@@ -235,8 +276,52 @@ async function generateFromSession(sessionId) {
     testArtifacts,
   };
 
-  // Salvar JSON
+  // Salvar JSON completo
   writeFileSync(jsonPath, JSON.stringify(reportData, null, 2), 'utf8');
+
+  // Salvar SUMMARY enxuto — pensado para ser lido por IA/automação.
+  // O JSON completo passa de 300 KB (só `manualVerification` é ~1/3 dele) e
+  // custa dezenas de milhares de tokens para uma IA ler. O summary carrega o
+  // que responde 90% das perguntas ("quão ruim está? o que é mais grave? onde?")
+  // em ~15 KB, e aponta para o JSON completo quando o detalhe for necessário.
+  const summaryPath = pathJoin(reportsDir, `security-audit-${stamp}.summary.json`);
+  const summary = {
+    meta: reportMeta,
+    score: {
+      total: scoreBreakdown.totalScore,
+      grade: scoreBreakdown.grade,
+      gradeLabel: scoreBreakdown.gradeLabel,
+      // gradeCap: quando a nota foi limitada por severidade (ex.: existe CRITICAL,
+      // então no máximo D) — a IA precisa disso para explicar a nota corretamente.
+      gradeCap: scoreBreakdown.gradeCap ?? null,
+      maxPossible: scoreBreakdown.maxPossible ?? null,
+      // Só categorias efetivamente AVALIADAS entram — categoria não avaliada não
+      // é categoria aprovada (era o "piso grátis" de 60 pts do modelo antigo).
+      categories: (scoreBreakdown.categories || [])
+        .filter(c => c.evaluated !== false)
+        .map(c => ({
+          id: c.id, label: c.label,
+          earnedPts: c.earnedPts, maxPts: c.maxPts, pct: c.pct,
+          issues: c.issueCount, occurrences: c.occurrenceTotal,
+        })),
+      unmappedTypes: scoreBreakdown.unmappedTypes || [],
+    },
+    counts,
+    // Só o essencial por achado. Sem manualVerification, sem recommendation longa.
+    findings: firstPartyIssues.map(f => ({
+      type: f.type,
+      severity: f.severity,
+      subject: f.header || f.cookieName || f.key || f.library || f.port || null,
+      url: f.url || null,
+      owasp: f.owasp || null,
+      cwe: f.cwe || null,
+      confidence: f.confidence || null,
+      occurrences: f.occurrenceCount || 1,
+      risk: typeof f.risk === 'string' ? f.risk.slice(0, 240) : null,
+    })),
+    reports: { html: htmlPath, md: mdPath, json: jsonPath, pdf: pdfPath },
+  };
+  writeFileSync(summaryPath, JSON.stringify(summary, null, 2), 'utf8');
 
   // Gerar e salvar HTML
   const { generateEnterpriseMd: genMd } = await import('../report/md-report.mjs');
@@ -267,7 +352,7 @@ async function generateFromSession(sessionId) {
     console.log(chalk.gray(`  (PDF: ${err.message})`));
   });
 
-  return { htmlPath, mdPath, jsonPath, pdfPath, scoreBreakdown, counts };
+  return { htmlPath, mdPath, jsonPath, pdfPath, summaryPath, scoreBreakdown, counts };
 }
 
 // ── Função principal exportada ────────────────────────────────
@@ -278,11 +363,11 @@ async function generateFromSession(sessionId) {
  * @param {object} opts - opções (scope, activeMode, timeoutMs, sessionId)
  */
 export async function startDaemon(targetUrl, opts = {}) {
-  const { scope = 'navigate', activeMode = false, timeoutMs = 60 * 60 * 1000 } = opts;
+  const { scope = 'navigate', activeMode = false, secondAccount = false, timeoutMs = 60 * 60 * 1000 } = opts;
 
   // 1. Verificar crash recovery
   if (!opts.sessionId) {
-    const recovery = await handleCrashRecovery();
+    const recovery = await handleCrashRecovery(opts.onOrphan);
     if (recovery) {
       if (recovery.action === 'report') {
         console.log(chalk.cyan('\n📝 Gerando relatório da sessão anterior...'));

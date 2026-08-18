@@ -20,12 +20,13 @@ import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 
 import { analyzeStorage, analyzeCookies } from './rules/storage-rules.mjs';
-import { analyzeSourceCode, analyzeInlineScripts } from './rules/code-rules.mjs';
+import { analyzeSourceCode, analyzeInlineScripts, fetchAndAnalyzeSourceMap } from './rules/code-rules.mjs';
 import { analyzeHeaders, analyzeProtocol } from './rules/header-rules.mjs';
 import { analyzeRequest, analyzeResponse } from './rules/network-rules.mjs';
 import { classifyResource, isMinified, sameRegistrableDomain } from './rules/context-rules.mjs';
-import { detectLibraries } from './rules/library-rules.mjs';
-import { runActiveChecks, runIdorChecks } from './rules/active-rules.mjs';
+import { detectLibraries, detectAllLibraryVersions, checkOsvVulnerabilities } from './rules/library-rules.mjs';
+import { runActiveChecks, runIdorChecks, checkRateLimit, checkUserEnumeration, checkPasswordPolicyHints } from './rules/active-rules.mjs';
+import { crossAccountIdorCheck } from './rules/idor-cross-account.mjs';
 import { mapFinding } from './rules/owasp-map.mjs';
 import { runRecon, probePaths, diffAccessControl, testOpenRedirect, testBackupFiles, fingerprintFromCookies } from './rules/recon-rules.mjs';
 
@@ -49,6 +50,7 @@ import { generateTestArtifacts } from './generators/test-generator.mjs';
 import { enrichWithVerification } from './generators/manual-verification.mjs';
 
 // Novo sistema de relatório
+import { deduplicateFindings } from './report/dedup.mjs';
 import { computeScoreBreakdown } from './report/score-breakdown.mjs';
 import { generateEnterpriseHtml } from './report/html-report.mjs';
 import { generateEnterpriseMd } from './report/md-report.mjs';
@@ -63,6 +65,10 @@ let args = process.argv.slice(2);
 let targetUrl = args.find(a => a.startsWith('http'));
 let shouldCrawl = args.includes('--crawl');
 let activeMode = args.includes('--active');
+// IDOR com 2 contas reais (ver rules/idor-cross-account.mjs). Opt-in explícito
+// e separado de --active porque exige um SEGUNDO login humano no meio da
+// auditoria — não é algo que deva acontecer por padrão só por ligar --active.
+let secondAccountMode = args.includes('--second-account');
 let assumeYes = args.includes('--yes') || args.includes('-y');
 let recordHar = !args.includes('--no-har');
 let scope = null;
@@ -74,6 +80,7 @@ function parseConfiguration() {
   targetUrl = args.find(a => a.startsWith('http'));
   shouldCrawl = args.includes('--crawl');
   activeMode = args.includes('--active');
+  secondAccountMode = args.includes('--second-account');
   assumeYes = args.includes('--yes') || args.includes('-y');
   recordHar = !args.includes('--no-har');
 
@@ -112,8 +119,11 @@ function printUsageAndExit() {
   console.log(chalk.gray('  --crawl      Navegar por links internos automaticamente'));
   console.log(chalk.gray('  --timeout N  Tempo máximo em segundos (padrão: 300)'));
   console.log(chalk.gray('  --idle N     Navegação: para após N s sem página nova (padrão: 180)'));
-  console.log(chalk.gray('  --active     Testes ATIVOS (métodos HTTP, security.txt, arquivos'));
-  console.log(chalk.gray('               sensíveis). Só use com AUTORIZAÇÃO do dono do alvo.'));
+  console.log(chalk.gray('  --active     Testes ATIVOS (métodos HTTP, rate limit, enumeração de'));
+  console.log(chalk.gray('               usuário, security.txt, arquivos sensíveis, IDOR). Só use'));
+  console.log(chalk.gray('               com AUTORIZAÇÃO do dono do alvo.'));
+  console.log(chalk.gray('  --second-account  IDOR com 2 contas reais (exige --active). Pausa a'));
+  console.log(chalk.gray('               auditoria pedindo um SEGUNDO login humano.'));
   console.log(chalk.gray('  --no-har     Não gravar o arquivo HAR da sessão'));
   console.log(chalk.gray('  --yes / -y   Não perguntar nada, usar padrões/flags'));
   process.exit(1);
@@ -134,6 +144,13 @@ const browserIssues = [];             // findings vindos do painel Issues (CDP A
 const seenBrowserIssue = new Set();   // dedup de issues do navegador
 const idorCandidates = [];            // URLs GET autenticadas com ID numérico
 const seenIdor = new Set();
+let loginFormMeta = null;             // {actionUrl, method, passField, userField} do form de login
+const detectedLibraries = [];         // {name, version} de toda lib com versão identificável (p/ OSV.dev)
+const seenLibraryVersion = new Set();
+// Headers REAIS da resposta de documento (navegação), por URL. Preenchido no
+// handler page.on('response'). É a única fonte confiável para auditar headers de
+// segurança — ver comentário em collectPageData.
+const documentHeaders = new Map();
 let lastNavActivity = 0;              // timestamp da última página nova (modo navegação)
 const firstPartyAssets = [];         // URLs de JS/CSS do seu domínio (p/ backup guessing)
 const seenAssets = new Set();
@@ -201,6 +218,7 @@ export async function runAudit(url, opts = {}, hooks = null, finalizePromise = n
   }
 
   if (opts.activeMode) process.argv.push('--active');
+  if (opts.secondAccount) process.argv.push('--second-account');
 
   // Pular perguntas interativas — as respostas já vêm via opts
   process.argv.push('--yes');
@@ -385,6 +403,10 @@ function diffCookies(before, after) {
         expires: cookie.expires > 0 ? new Date(cookie.expires * 1000).toISOString() : 'sessão',
       },
       issues,
+      // `note` é a legenda curta usada nas listas de diff do relatório. Os demais
+      // findings de diff (login_cookie_removed, login_storage_*) definem; este não
+      // definia, e a linha saía como "➕ undefined" para o usuário.
+      note: `Login ADICIONOU cookie "${cookie.name}"${issues.length > 0 ? ` (flags inseguras: ${issues.join(', ')})` : ''}`,
       risk: issues.length > 0
         ? `Login criou cookie "${cookie.name}" com flags inseguras: ${issues.join(', ')}`
         : `Login criou cookie "${cookie.name}" (flags OK)`,
@@ -613,6 +635,27 @@ async function auditLoginPage(page, url) {
       loginFormFindings.forEach(logFinding);
     }
     findings.push(...loginFormFindings);
+
+    // Guarda action/nomes de campo do form de login para os testes ativos de
+    // rate-limit/enumeração (rodam bem mais tarde, na fase pós-login — a
+    // própria tela de login já não está mais aberta nesse ponto).
+    try {
+      loginFormMeta = await page.evaluate(() => {
+        const form = Array.from(document.querySelectorAll('form'))
+          .find(f => f.querySelector('input[type="password"]'));
+        if (!form) return null;
+        const passInput = form.querySelector('input[type="password"]');
+        const userInput = form.querySelector(
+          'input[type="email"], input[name*="user" i], input[name*="email" i], input[name*="login" i], input[name*="usuario" i]'
+        ) || form.querySelector('input[type="text"]');
+        return {
+          actionUrl: form.action || window.location.href,
+          method: (form.method || 'POST').toUpperCase(),
+          passField: passInput?.name || passInput?.id || null,
+          userField: userInput?.name || userInput?.id || null,
+        };
+      });
+    } catch { loginFormMeta = null; }
   } catch (err) {
     console.log(chalk.red(`  ❌ Erro ao analisar formulário de login: ${err.message}`));
   }
@@ -756,7 +799,32 @@ async function collectPageData(page, url) {
           // Tier 2: bibliotecas JS vulneráveis (por URL + assinatura no conteúdo)
           const libFindings = detectLibraries(scriptUrl, response, { thirdParty, vendor });
 
-          const allScriptFindings = [...codeFindings, ...libFindings];
+          // Acumula TODA lib com versão identificável (vulnerável ou não pela
+          // lista fixa acima) para checar contra o OSV.dev uma única vez no fim
+          // da sessão — ver comentário de detectAllLibraryVersions.
+          for (const lib of detectAllLibraryVersions(scriptUrl, response)) {
+            const key = `${lib.name}@${lib.version}`;
+            if (seenLibraryVersion.has(key)) continue;
+            seenLibraryVersion.add(key);
+            detectedLibraries.push({ ...lib, url: scriptUrl, thirdParty, vendor });
+          }
+
+          // Source map: a detecção em analyzeSourceCode só confirma a
+          // REFERÊNCIA. Se existir, baixa de verdade e escaneia o conteúdo
+          // original por segredos/rotas internas — é uma requisição passiva a
+          // um recurso já publicamente linkado pelo próprio script, roda sempre
+          // (não precisa de --active).
+          const smFinding = codeFindings.find(f => f.type === 'source_map_exposed');
+          let sourceMapFindings = [];
+          if (smFinding?.mapUrl) {
+            try {
+              sourceMapFindings = await fetchAndAnalyzeSourceMap(
+                page.context().request, smFinding.mapUrl, scriptUrl, { thirdParty, vendor }
+              );
+            } catch { /* ausência de evidência não é achado */ }
+          }
+
+          const allScriptFindings = [...codeFindings, ...libFindings, ...sourceMapFindings];
           if (allScriptFindings.length > 0) {
             const fpCount = allScriptFindings.filter(f => !f.thirdParty).length;
             const tag = thirdParty ? chalk.gray(`[3ª parte${vendor ? '/' + vendor : ''}]`) : chalk.white('[SEU]');
@@ -781,18 +849,27 @@ async function collectPageData(page, url) {
   pageFindings.push(...protocolFindings);
 
   // 5. Analisar headers da página principal
+  //
+  // ATENÇÃO: NÃO refaça a requisição aqui para "pegar os headers". A versão
+  // antiga fazia fetch(url, {method:'HEAD'}) de dentro da página, e isso gerava
+  // falso positivo em massa: frameworks modernos (Next.js/app router) não tratam
+  // HEAD em rotas de página e respondem 404 pelado — SEM nenhum header de
+  // segurança. O auditor lia esse 404 e concluía que CSP/HSTS/X-Frame-Options/
+  // Referrer-Policy/Permissions-Policy/COOP/COEP estavam todos ausentes, quando
+  // na verdade o GET real devolvia todos eles.
+  //   Caso real (bancopopular, Next.js): GET / → 307 COM HSTS; HEAD / → 404 sem
+  //   nada. Resultado: 9 achados de header, todos falsos, incluindo 2 HIGH.
+  // A fonte da verdade é a resposta de documento da navegação de verdade,
+  // capturada em page.on('response') (documentHeaders).
   console.log(chalk.gray('  📋 Analisando headers de segurança...'));
   try {
-    const response = await page.evaluate(async (pageUrl) => {
-      try {
-        const res = await fetch(pageUrl, { method: 'HEAD', credentials: 'same-origin' });
-        const headers = {};
-        res.headers.forEach((value, key) => { headers[key] = value; });
-        return headers;
-      } catch {
-        return null;
-      }
-    }, url);
+    const response = documentHeaders.get((url || '').split('#')[0]) || null;
+
+    if (!response) {
+      // Sem resposta de documento registrada (ex.: rota de SPA que trocou de tela
+      // sem nova navegação). Melhor não afirmar nada do que afirmar errado.
+      console.log(chalk.gray('  (headers: sem resposta de documento capturada para esta URL — pulando p/ não gerar falso positivo)'));
+    }
 
     if (response) {
       const headerFindings = analyzeHeaders(response, url);
@@ -1207,419 +1284,20 @@ function evidenceOf(f) {
   return parts;
 }
 
-function generateMarkdownReport(report, counts, regression = { hasPrev: false }) {
-  const lines = [];
-
-  lines.push('# 🛡️ Sentinela — Relatório de Auditoria de Segurança');
-  lines.push('');
-  lines.push(`**Alvo:** ${report.meta.target}`);
-  lines.push(`**Data:** ${new Date(report.meta.timestamp).toLocaleString('pt-BR')}`);
-  lines.push(`**Páginas auditadas:** ${report.meta.pagesAudited}`);
-  lines.push(`**Fases:** PRÉ-LOGIN → LOGIN → PÓS-LOGIN`);
-  lines.push('');
-
-  // Resumo (contagem = SÓ problemas de 1ª parte / seu código)
-  const tc = report.meta.thirdPartySeverity || { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
-  const thirdTotal = report.meta.thirdPartyIssues || 0;
-  lines.push('## 📊 Resumo');
-  lines.push('');
-  lines.push('> Contagem e nota consideram **apenas problemas do seu código/config (1ª parte)**. Achados em bibliotecas e domínios de terceiros ficam na seção própria e não afetam a nota.');
-  lines.push('');
-  lines.push('| Severidade | Seu (1ª parte) | Terceiros |');
-  lines.push('|------------|:--------------:|:---------:|');
-  lines.push(`| 🔴 CRITICAL | ${counts.CRITICAL} | ${tc.CRITICAL} |`);
-  lines.push(`| 🟠 HIGH | ${counts.HIGH} | ${tc.HIGH} |`);
-  lines.push(`| 🟡 MEDIUM | ${counts.MEDIUM} | ${tc.MEDIUM} |`);
-  lines.push(`| 🔵 LOW | ${counts.LOW} | ${tc.LOW} |`);
-  lines.push(`| **TOTAL** | **${report.meta.firstPartyIssues}** | **${thirdTotal}** |`);
-  lines.push('');
-
-  // Score (já calculado só com 1ª parte)
-  const score = report.meta.score;
-  lines.push(`### Nota de Segurança: ${score}/100 ${score >= 80 ? '✅' : score >= 50 ? '⚠️' : '❌'}`);
-  lines.push('');
-
-  // Regressão vs execução anterior (Tier 4)
-  if (regression.hasPrev) {
-    const delta = score - (regression.prevScore ?? score);
-    const arrow = delta > 0 ? `📈 +${delta}` : delta < 0 ? `📉 ${delta}` : '➖ 0';
-    lines.push('### 🔁 Comparação com a execução anterior');
-    lines.push('');
-    lines.push(`- Nota: **${regression.prevScore ?? '?'} → ${score}** (${arrow})`);
-    lines.push(`- 🆕 Novos problemas: **${regression.new.length}**`);
-    lines.push(`- ✅ Problemas corrigidos: **${regression.fixed.length}**`);
-    lines.push(`- ⏳ Persistentes: **${regression.persisted}**`);
-    if (regression.new.length > 0) {
-      lines.push('');
-      lines.push('**Novos desde a última auditoria:**');
-      for (const f of regression.new.slice(0, 15)) lines.push(`- 🆕 [${f.severity}] ${f.label || f.type}`);
-    }
-    if (regression.fixed.length > 0) {
-      lines.push('');
-      lines.push('**Corrigidos desde a última auditoria:**');
-      for (const f of regression.fixed.slice(0, 15)) lines.push(`- ✅ [${f.severity}] ${f.label || f.type}`);
-    }
-    lines.push('');
-  }
-
-  // Agrupar por fase
-  const phases = ['PRÉ-LOGIN', 'LOGIN', 'PÓS-LOGIN'];
-  const phaseEmoji = { 'PRÉ-LOGIN': '🔐', 'LOGIN': '🔄', 'PÓS-LOGIN': '🏠' };
-  const phaseDescriptions = {
-    'PRÉ-LOGIN': 'Problemas encontrados na página de login ANTES de fazer login',
-    'LOGIN': 'Problemas detectados DURANTE o processo de login',
-    'PÓS-LOGIN': 'Problemas encontrados após autenticação',
-  };
-
-  for (const phase of phases) {
-    const phaseItems = report.findings.filter(f => f.phase === phase);
-    if (phaseItems.length === 0) continue;
-
-    lines.push(`## ${phaseEmoji[phase]} Fase: ${phase}`);
-    lines.push(`> ${phaseDescriptions[phase]}`);
-    lines.push('');
-
-    // Sub-agrupar por severidade dentro da fase
-    const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
-    const severityEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🔵' };
-
-    for (const severity of severityOrder) {
-      const items = phaseItems.filter(f => f.severity === severity);
-      if (items.length === 0) continue;
-
-      lines.push(`### ${severityEmoji[severity]} ${severity} (${items.length})`);
-      lines.push('');
-
-      for (const item of items) {
-        lines.push(`#### ${item.label || item.type}`);
-        lines.push('');
-
-        const badge = [item.owasp, item.cwe && item.cwe !== '—' ? item.cwe : '', item.confidence ? `confiança: ${item.confidence}` : ''].filter(Boolean).join(' · ');
-        if (badge) { lines.push(`\`${badge}\``); lines.push(''); }
-
-        if (item.url) lines.push(`**Onde:** \`${item.url}\``);
-        if (item.key) lines.push(`**Chave:** \`${item.key}\``);
-        if (item.cookieName) lines.push(`**Cookie:** \`${item.cookieName}\``);
-        if (item.header) lines.push(`**Header:** \`${item.header}\``);
-        if (item.storage) lines.push(`**Storage:** \`${item.storage}\``);
-        if (item.match) lines.push(`**Código encontrado:** \`${item.match}\``);
-        lines.push('');
-
-        const ev = evidenceOf(item);
-        if (ev.length > 0) {
-          lines.push('**🔎 Evidência capturada:**');
-          ev.forEach(e => lines.push(`- \`${e}\``));
-          lines.push('');
-        }
-
-        if (item.risk) {
-          lines.push('**🎯 Risco:**');
-          lines.push(`> ${item.risk.replace(/\n/g, '\n> ')}`);
-          lines.push('');
-        }
-
-        if (item.attackExample) {
-          lines.push('**💀 Como o atacante explora:**');
-          lines.push(`> ${item.attackExample}`);
-          lines.push('');
-        }
-
-        if (item.recommendation) {
-          lines.push('**✅ Recomendação:**');
-          lines.push(`> ${item.recommendation}`);
-          lines.push('');
-        }
-
-        if (item.jwtDecoded) {
-          lines.push('**🔓 JWT Decodificado:**');
-          lines.push('```json');
-          lines.push(JSON.stringify(item.jwtDecoded, null, 2));
-          lines.push('```');
-          lines.push('');
-        }
-
-        if (item.issues && item.issues.length > 0) {
-          lines.push('**Problemas encontrados:**');
-          for (const issue of item.issues) {
-            if (typeof issue === 'string') {
-              lines.push(`- ${issue}`);
-            } else {
-              lines.push(`- **${issue.flag}**: ${issue.risk}`);
-            }
-          }
-          lines.push('');
-        }
-
-        lines.push('---');
-        lines.push('');
-      }
-    }
-  }
-
-  // Findings sem fase (rede, etc.)
-  const noPhaseItems = report.findings.filter(f => !f.phase);
-  if (noPhaseItems.length > 0) {
-    lines.push('## 🌐 Geral (sem fase específica)');
-    lines.push('');
-    for (const item of noPhaseItems) {
-      lines.push(`### ${item.label || item.type}`);
-      lines.push('');
-      if (item.url) lines.push(`**Onde:** \`${item.url}\``);
-      if (item.risk) {
-        lines.push('**🎯 Risco:**');
-        lines.push(`> ${item.risk.replace(/\n/g, '\n> ')}`);
-        lines.push('');
-      }
-      if (item.recommendation) {
-        lines.push('**✅ Recomendação:**');
-        lines.push(`> ${item.recommendation}`);
-        lines.push('');
-      }
-      lines.push('---');
-      lines.push('');
-    }
-  }
-
-  // ── Terceiros (fora do seu controle) — resumo compacto ──
-  const tpItems = report.thirdParty || [];
-  if (tpItems.length > 0) {
-    lines.push('## 🏢 Terceiros (fora do seu controle)');
-    lines.push('> Achados em bibliotecas, CDNs e domínios de terceiros (HubSpot, LinkedIn, Cloudflare, etc.). Você geralmente **não pode corrigir** — são responsabilidade do fornecedor. Listados de forma agrupada, apenas para referência. **Não entram na nota.**');
-    lines.push('');
-    // Agrupar por vendor + label
-    const groups = {};
-    for (const f of tpItems) {
-      const g = `${f.vendor || 'Terceiro'} — ${f.label || f.type}`;
-      groups[g] = (groups[g] || 0) + 1;
-    }
-    lines.push('| Origem / Tipo | Ocorrências |');
-    lines.push('|---------------|:-----------:|');
-    for (const [g, n] of Object.entries(groups).sort((a, b) => b[1] - a[1])) {
-      lines.push(`| ${g} | ${n} |`);
-    }
-    lines.push('');
-  }
-
-  // Rotas e endpoints capturados (relatório detalhado)
-  const routes = report.routes || [];
-  if (routes.length > 0) {
-    const fp = routes.filter(r => !r.thirdParty);
-    const tp = routes.length - fp.length;
-    lines.push('## 🗺️ Rotas e Endpoints capturados');
-    lines.push(`> ${routes.length} requisições distintas observadas (${fp.length} do seu domínio, ${tp} de terceiros). Documentos e chamadas de API — assets estáticos (img/css/fonte) omitidos.`);
-    lines.push('');
-    if ((report.pagesVisited || []).length > 0) {
-      lines.push('**Páginas visitadas:**');
-      report.pagesVisited.forEach(u => lines.push(`- ${u}`));
-      lines.push('');
-    }
-    if (fp.length > 0) {
-      lines.push('**Endpoints (seu domínio):**');
-      lines.push('');
-      lines.push('| Método | Rota | Tipo | Fase | Auth |');
-      lines.push('|--------|------|------|------|:----:|');
-      for (const r of fp.slice(0, 100)) {
-        lines.push(`| ${r.method} | \`${r.path}${r.query ? '?' + r.query : ''}\` | ${r.kind} | ${r.phase} | ${r.hasAuth ? '🔑' : ''} |`);
-      }
-      lines.push('');
-    }
-  }
-
-  // Inventário — Login diff
-  const loginDiffItems = report.inventory.filter(f => f.phase === 'LOGIN');
-  if (loginDiffItems.length > 0) {
-    lines.push('## 🔄 O que o LOGIN alterou (diff before/after)');
-    lines.push('');
-    for (const item of loginDiffItems) {
-      const icon = item.type.includes('added') ? '➕' : item.type.includes('removed') ? '➖' : '✏️';
-      lines.push(`- ${icon} ${item.note}`);
-    }
-    lines.push('');
-  }
-
-  // Inventário geral
-  const inventoryItems = report.inventory.filter(f => f.type !== 'auth_header_detected' && !f.phase);
-  if (inventoryItems.length > 0) {
-    lines.push('## 📋 Inventário (informativo)');
-    lines.push('');
-    for (const item of inventoryItems) {
-      if (item.type === 'storage_inventory') {
-        lines.push(`- **${item.storage}**: ${item.keys.join(', ')}`);
-      } else if (item.type === 'cookie_inventory') {
-        lines.push(`- **Cookies (${item.cookies.length})**: ${item.cookies.map(c => `${c.name} (httpOnly:${c.httpOnly}, secure:${c.secure})`).join(', ')}`);
-      }
-    }
-    lines.push('');
-  }
-
-  lines.push('---');
-  lines.push('*Relatório gerado automaticamente por **Sentinela** — Vulnerability Collector*');
-
-  return lines.join('\n');
-}
-
-// ─── Relatório HTML apresentável (Tier 4) ─────────────────
-
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function generateHtmlReport(report, counts, regression = { hasPrev: false }) {
-  const m = report.meta;
-  const score = m.score;
-  const scoreColor = score >= 80 ? '#2f9e44' : score >= 50 ? '#f08c00' : '#c92a2a';
-  const sevColor = { CRITICAL: '#c92a2a', HIGH: '#e8590c', MEDIUM: '#f08c00', LOW: '#1c7ed6', INFO: '#868e96' };
-
-  const card = (label, val, color) =>
-    `<div class="card"><div class="num" style="color:${color}">${val}</div><div class="lbl">${label}</div></div>`;
-
-  const findingHtml = (f) => `
-    <div class="finding sev-${f.severity}">
-      <div class="fhead">
-        <span class="pill" style="background:${sevColor[f.severity] || '#868e96'}">${f.severity}</span>
-        <span class="ftitle">${escapeHtml(f.label || f.type)}</span>
-      </div>
-      <div class="meta">${[f.owasp, f.cwe && f.cwe !== '—' ? f.cwe : '', f.confidence ? 'confiança: ' + f.confidence : ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
-      ${f.url ? `<div class="where"><b>Onde:</b> <code>${escapeHtml(f.url)}</code></div>` : ''}
-      ${f.cve ? `<div class="where"><b>CVE:</b> ${escapeHtml(f.cve)}${f.fixedIn ? ` — corrigido em ${escapeHtml(f.fixedIn)}` : ''}</div>` : ''}
-      ${(() => { const ev = evidenceOf(f); return ev.length ? `<div class="evid"><b>🔎 Evidência capturada:</b><ul>${ev.map(e => `<li><code>${escapeHtml(e)}</code></li>`).join('')}</ul></div>` : ''; })()}
-      ${f.risk ? `<div class="risk">${escapeHtml(f.risk)}</div>` : ''}
-      ${f.recommendation ? `<div class="rec"><b>✅ Sugestão:</b> ${escapeHtml(f.recommendation)}</div>` : ''}
-    </div>`;
-
-  // Agrupar 1ª parte por OWASP
-  const byOwasp = {};
-  for (const f of report.findings) {
-    const k = f.owasp || 'Outros';
-    (byOwasp[k] = byOwasp[k] || []).push(f);
-  }
-  const sevRank = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
-  const owaspSections = Object.entries(byOwasp)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([owasp, items]) => {
-      items.sort((x, y) => sevRank[x.severity] - sevRank[y.severity]);
-      return `<h3>${escapeHtml(owasp)} <span class="count">(${items.length})</span></h3>${items.map(findingHtml).join('')}`;
-    }).join('');
-
-  // Terceiros agrupados
-  const tpGroups = {};
-  for (const f of (report.thirdParty || [])) {
-    const k = `${f.vendor || 'Terceiro'} — ${f.label || f.type}`;
-    tpGroups[k] = (tpGroups[k] || 0) + 1;
-  }
-  const tpRows = Object.entries(tpGroups).sort((a, b) => b[1] - a[1])
-    .map(([k, n]) => `<tr><td>${escapeHtml(k)}</td><td style="text-align:center">${n}</td></tr>`).join('');
-
-  // Rotas / endpoints
-  const routes = report.routes || [];
-  const fpRoutes = routes.filter(r => !r.thirdParty);
-  const routeRows = fpRoutes.slice(0, 120).map(r =>
-    `<tr><td>${escapeHtml(r.method)}</td><td><code>${escapeHtml(r.path + (r.query ? '?' + r.query : ''))}</code></td><td>${escapeHtml(r.kind)}</td><td>${escapeHtml(r.phase)}</td><td style="text-align:center">${r.hasAuth ? '🔑' : ''}</td></tr>`).join('');
-  const pagesHtml = (report.pagesVisited || []).map(u => `<li><code>${escapeHtml(u)}</code></li>`).join('');
-
-  // Regressão
-  let regHtml = '';
-  if (regression.hasPrev) {
-    const delta = score - (regression.prevScore ?? score);
-    const arrow = delta > 0 ? `▲ +${delta}` : delta < 0 ? `▼ ${delta}` : '– 0';
-    const dColor = delta > 0 ? '#2f9e44' : delta < 0 ? '#c92a2a' : '#868e96';
-    regHtml = `<div class="reg">
-      <h2>🔁 Comparação com a execução anterior</h2>
-      <div class="reggrid">
-        ${card('Nota anterior', regression.prevScore ?? '?', '#495057')}
-        ${card('Nota atual', score, scoreColor)}
-        ${card('Variação', arrow, dColor)}
-        ${card('🆕 Novos', regression.new.length, '#c92a2a')}
-        ${card('✅ Corrigidos', regression.fixed.length, '#2f9e44')}
-        ${card('⏳ Persistentes', regression.persisted, '#f08c00')}
-      </div>
-    </div>`;
-  }
-
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sentinela — Relatório de Segurança — ${escapeHtml(m.target)}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f1f3f5; color: #212529; }
-  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px; }
-  header { background: #1a1b1e; color: #fff; border-radius: 14px; padding: 28px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-  header h1 { font-size: 18px; margin: 0 0 6px; font-weight: 600; }
-  header .target { color: #adb5bd; font-size: 13px; word-break: break-all; }
-  .gauge { text-align: center; min-width: 130px; }
-  .gauge .val { font-size: 46px; font-weight: 800; line-height: 1; }
-  .gauge .cap { font-size: 12px; color: #adb5bd; }
-  .cards { display: flex; gap: 12px; margin: 20px 0; flex-wrap: wrap; }
-  .card { background: #fff; border-radius: 12px; padding: 16px 20px; flex: 1; min-width: 120px; box-shadow: 0 1px 3px rgba(0,0,0,.06); text-align: center; }
-  .card .num { font-size: 30px; font-weight: 700; }
-  .card .lbl { font-size: 12px; color: #868e96; margin-top: 4px; }
-  .note { background: #fff3bf; border: 1px solid #ffe066; border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #664d03; margin: 16px 0; }
-  h2 { font-size: 16px; margin: 28px 0 12px; border-bottom: 2px solid #dee2e6; padding-bottom: 6px; }
-  h3 { font-size: 14px; margin: 20px 0 10px; color: #343a40; }
-  h3 .count { color: #adb5bd; font-weight: 400; }
-  .finding { background: #fff; border-radius: 10px; padding: 14px 16px; margin: 10px 0; border-left: 4px solid #ced4da; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-  .finding.sev-CRITICAL { border-left-color: #c92a2a; } .finding.sev-HIGH { border-left-color: #e8590c; }
-  .finding.sev-MEDIUM { border-left-color: #f08c00; } .finding.sev-LOW { border-left-color: #1c7ed6; }
-  .fhead { display: flex; align-items: center; gap: 10px; }
-  .pill { color: #fff; font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 20px; letter-spacing: .5px; }
-  .ftitle { font-weight: 600; font-size: 14px; }
-  .meta { font-size: 11px; color: #868e96; margin: 6px 0; }
-  .where { font-size: 12px; margin: 4px 0; } .where code { background: #f1f3f5; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
-  .risk { font-size: 13px; color: #495057; margin: 8px 0; }
-  .rec { font-size: 13px; color: #2b5c34; background: #ebfbee; padding: 8px 10px; border-radius: 6px; }
-  .evid { font-size: 12px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 6px 10px; margin: 6px 0; }
-  .evid ul { margin: 4px 0 0; padding-left: 18px; } .evid code, .routes code { word-break: break-all; }
-  .routes { font-size: 12px; }
-  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; }
-  th, td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid #f1f3f5; text-align: left; }
-  th { background: #f8f9fa; }
-  .reggrid { display: flex; gap: 12px; flex-wrap: wrap; }
-  footer { text-align: center; color: #adb5bd; font-size: 12px; margin: 30px 0 10px; }
-</style></head><body><div class="wrap">
-  <header>
-    <div>
-      <h1>🛡️ Sentinela — Relatório de Segurança</h1>
-      <div class="target">${escapeHtml(m.target)}</div>
-      <div class="target">${new Date(m.timestamp).toLocaleString('pt-BR')} · ${m.pagesAudited} página(s)</div>
-    </div>
-    <div class="gauge"><div class="val" style="color:${scoreColor}">${score}</div><div class="cap">/ 100 — só 1ª parte</div></div>
-  </header>
-
-  <div class="cards">
-    ${card('🔴 CRITICAL', counts.CRITICAL, sevColor.CRITICAL)}
-    ${card('🟠 HIGH', counts.HIGH, sevColor.HIGH)}
-    ${card('🟡 MEDIUM', counts.MEDIUM, sevColor.MEDIUM)}
-    ${card('🔵 LOW', counts.LOW, sevColor.LOW)}
-    ${card('🏢 Terceiros', m.thirdPartyIssues, '#868e96')}
-  </div>
-
-  <div class="note">Contagem e nota consideram <b>apenas o seu código/config (1ª parte)</b>. Achados em bibliotecas e domínios de terceiros aparecem à parte e não afetam a nota.</div>
-
-  ${regHtml}
-
-  <h2>🔎 Achados (seu código / config)</h2>
-  ${report.findings.length ? owaspSections : '<p>Nenhum problema de 1ª parte encontrado. 🎉</p>'}
-
-  ${routes.length ? `<h2>🗺️ Rotas e Endpoints capturados</h2>
-  <p style="font-size:13px;color:#868e96">${routes.length} requisições distintas observadas (${fpRoutes.length} do seu domínio). Documentos e chamadas de API — assets estáticos omitidos.</p>
-  ${pagesHtml ? `<p style="font-size:13px;margin-bottom:4px"><b>Páginas visitadas:</b></p><ul class="routes">${pagesHtml}</ul>` : ''}
-  ${routeRows ? `<table class="routes"><thead><tr><th>Método</th><th>Rota</th><th>Tipo</th><th>Fase</th><th>Auth</th></tr></thead><tbody>${routeRows}</tbody></table>` : ''}` : ''}
-
-  ${tpRows ? `<h2>🏢 Terceiros (fora do seu controle)</h2>
-  <p style="font-size:13px;color:#868e96">Bibliotecas/CDNs/domínios de terceiros. Você geralmente não pode corrigir — não entram na nota.</p>
-  <table><thead><tr><th>Origem / Tipo</th><th style="text-align:center">Ocorrências</th></tr></thead><tbody>${tpRows}</tbody></table>` : ''}
-
-  <footer>Gerado por Sentinela — Vulnerability Collector</footer>
-</div></body></html>`;
-}
+// NOTA: aqui viviam generateMarkdownReport/escapeHtml/generateHtmlReport (~400 linhas),
+// substituídos por src/report/md-report.mjs e src/report/html-report.mjs. Estavam órfãos
+// (nenhuma chamada em todo o src/) e divergiam do gerador real — inclusive continham o
+// bug que imprimia "+ undefined" para itens de inventário sem campo note.
 
 // ─── Análise de TLS/Certificado (Tier 2) ──────────────────
 
 function analyzeTLS(sec, url) {
   const findings = [];
   if (!sec) return findings;
+  // Sem HTTPS não há certificado a avaliar. Rodar as regras de cert aqui só
+  // produziria achado sobre um certificado que não existe (a falta de HTTPS já é
+  // reportada separadamente por analyzeProtocol → no_https).
+  if (!/^https:/i.test(url || '')) return findings;
   const proto = sec.protocol || '';
 
   // Protocolo obsoleto
@@ -1650,8 +1328,12 @@ function analyzeTLS(sec, url) {
     });
   }
 
-  // Certificado auto-assinado (issuer ausente ou == subject)
-  if (!sec.issuer || (sec.subjectName && sec.issuer === sec.subjectName)) {
+  // Certificado auto-assinado: issuer == subject.
+  // Exige EVIDÊNCIA POSITIVA. A versão antiga também disparava com `!sec.issuer`,
+  // ou seja, tratava "não consegui ler o emissor" como "é auto-assinado" — e
+  // acusava certificado auto-assinado até em alvo http:// puro, que não tem
+  // certificado nenhum. Ausência de dado é desconhecimento, não vulnerabilidade.
+  if (sec.issuer && sec.subjectName && sec.issuer === sec.subjectName) {
     findings.push({
       type: 'cert_self_signed', severity: 'MEDIUM', thirdParty: false,
       label: 'Certificado auto-assinado / CA não confiável', url,
@@ -1962,11 +1644,28 @@ async function main() {
       const status = response.status();
       const contentType = response.headers()['content-type'] || '';
 
+      // Guardar os headers REAIS de respostas de documento HTML (a navegação de
+      // verdade). collectPageData usa isso em vez de refazer a requisição — ver
+      // o comentário lá. Só documentos 2xx: um 3xx/4xx intermediário não carrega
+      // a política de segurança da página final.
+      try {
+        if (/text\/html/i.test(contentType) && status >= 200 && status < 300 &&
+            response.request().resourceType() === 'document') {
+          documentHeaders.set(url.split('#')[0], response.headers());
+        }
+      } catch { /* ignore */ }
+
       // Candidatos a IDOR/BOLA: GET, mesmo domínio, 200, com ID numérico na rota.
       // O teste em si só roda em modo --active (ver runIdorChecks).
       try {
+        // Só JSON. Páginas HTML de SPA devolvem o MESMO app shell para qualquer
+        // id (a tela é montada no cliente), então trocar o id não prova nada —
+        // gerava "IDOR confirmado" em cima de páginas que nem carregaram dados.
+        // Além disso cada candidato consome 2 requisições autenticadas do
+        // orçamento de 10; gastá-las com HTML tira o lugar dos endpoints de API,
+        // que é onde IDOR de fato aparece.
         if (response.request().method() === 'GET' && status === 200 &&
-            /application\/json|text\/html/i.test(contentType)) {
+            /application\/json/i.test(contentType)) {
           const u = new URL(url);
           if (sameRegistrableDomain(u.host, new URL(pageOrigin).host) &&
               /(?:\/|=)(\d{1,12})(?:\/|$|&|\?|;)/.test(u.pathname + u.search)) {
@@ -2051,8 +1750,13 @@ async function main() {
         }
       }
 
-      // Coletar headers da resposta principal
-      if (url === page.url()) {
+      // Coletar headers da resposta principal.
+      // Restrito a resposta de DOCUMENTO 2xx: um XHR/API para a mesma URL, ou um
+      // 3xx/4xx intermediário, não carrega a política de segurança da página e
+      // faria o auditor acusar headers ausentes que existem (mesmo falso positivo
+      // do fetch HEAD — ver comentário em collectPageData).
+      if (url === page.url() && status >= 200 && status < 300 &&
+          response.request().resourceType() === 'document') {
         const headers = response.headers();
         const headerFindings = analyzeHeaders(headers, url);
         const taggedHeaderFindings = headerFindings.map(f => ({ ...f, phase: currentPhase === 'login' ? 'LOGIN' : currentPhase === 'pre-login' ? 'PRÉ-LOGIN' : 'PÓS-LOGIN' }));
@@ -2283,6 +1987,14 @@ async function main() {
       process.stdin.once('data', () => finish('ENTER pressionado'));
     } catch { /* stdin indisponível — segue no modo automático */ }
 
+    // Gatilho 1b: sinal de finalização do daemon (HTTP/.finalize/timeout), direto —
+    // NÃO depende de simular ENTER via stdin (o truque em runAudit() pode falhar
+    // silenciosamente se stdin já estiver destruído/EOF em processo sem TTY, o que
+    // travava este wait indefinidamente — só saía pelo teto de 3h no modo navigate).
+    if (activeFinalizePromise) {
+      activeFinalizePromise.then(() => finish('sinal de finalização'));
+    }
+
     // Gatilho 2: poller a cada 1.5s
     const poller = setInterval(() => {
       // Modo navegação: NÃO finaliza automaticamente por inatividade nem por redirect.
@@ -2456,6 +2168,52 @@ async function main() {
       } catch (err) {
         console.log(chalk.red(`  ❌ Erro no teste de IDOR: ${err.message}`));
       }
+
+      // IDOR com 2 contas reais — prova definitiva, opt-in via --second-account.
+      // O teste acima só pode SUSPEITAR (trocar ID e ver 200 não prova que o
+      // objeto é de outro usuário). Este aqui usa uma SEGUNDA conta autenticada
+      // de verdade e tenta ler os MESMOS objetos que a primeira conta acessou —
+      // se conseguir, é confirmado, não suspeita.
+      if (secondAccountMode) {
+        if (!process.stdin.isTTY) {
+          console.log(chalk.yellow('  ⚠️  --second-account pedido, mas sem terminal interativo (precisa de um humano pra logar com a 2ª conta) — pulando.'));
+        } else {
+          try {
+            console.log(chalk.cyan.bold(`
+╔════════════════════════════════════════════════════════════╗
+║   🔑 TESTE DE IDOR COM 2 CONTAS — PRECISO DE UM 2º LOGIN     ║
+║                                                              ║
+║   Vou limpar os cookies e reabrir a tela de login. Faça      ║
+║   login agora com uma conta DIFERENTE da que você já usou.   ║
+║   Quando terminar, volte aqui e aperte ENTER.                ║
+║                                                              ║
+║   (Não quer fazer esse teste agora? Aperte ENTER direto —    ║
+║    sem uma 2ª conta, nenhum achado novo será gerado.)         ║
+╚════════════════════════════════════════════════════════════╝`));
+            await context.clearCookies();
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            await prompt(chalk.cyan('\n  Aperte ENTER quando tiver logado com a 2ª conta (ou pra pular): '));
+
+            const cookiesB = await context.cookies();
+            const cookieHeaderB = cookiesB.map(c => `${c.name}=${c.value}`).join('; ');
+            if (!cookieHeaderB) {
+              console.log(chalk.gray('  (nenhum cookie capturado — 2º login não foi feito, pulando o teste.)'));
+            } else {
+              console.log(chalk.magenta(`  🎯 Testando acesso cruzado em ${Math.min(10, idorCandidates.length)} objeto(s) da 1ª conta com a sessão da 2ª...`));
+              const crossFindings = await crossAccountIdorCheck(context.request, idorCandidates, cookieHeaderB);
+              if (crossFindings.length > 0) {
+                console.log(chalk.bgRed.white.bold(`  🔴 ${crossFindings.length} IDOR CONFIRMADO com 2 contas reais!`));
+                crossFindings.forEach(logFinding);
+              } else {
+                console.log(chalk.green('  ✅ A 2ª conta não conseguiu acessar objetos da 1ª.'));
+              }
+              allFindings.push(...crossFindings);
+            }
+          } catch (err) {
+            console.log(chalk.red(`  ❌ Erro no teste de IDOR com 2 contas: ${err.message}`));
+          }
+        }
+      }
     }
 
     // Open redirect (parâmetros de redirecionamento na URL alvo)
@@ -2544,6 +2302,66 @@ async function main() {
       risk: 'Erros de JavaScript podem indicar bugs ou falhas que facilitam exploração (ex.: entrada não tratada).',
       recommendation: 'Investigar e corrigir os erros de console; eles não deveriam aparecer em produção.',
     });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  📦 SCA REAL — OSV.dev (Open Source Vulnerabilities)
+  // ══════════════════════════════════════════════════════════
+  // 100% passivo PARA O ALVO: consulta o OSV.dev sobre nome+versão já
+  // detectados no browser, não manda nada pro site auditado. Roda sempre
+  // (não precisa de --active). Uma única chamada batch para toda a sessão.
+  if (detectedLibraries.length > 0) {
+    console.log(chalk.cyan(`\n📦 Consultando OSV.dev para ${detectedLibraries.length} biblioteca(s) detectada(s)...`));
+    try {
+      const osvFindings = await checkOsvVulnerabilities(detectedLibraries, {
+        onNotVerified: (info) => console.log(chalk.gray(`  (OSV: ${info.name} ${info.version} não verificado — ${info.error})`)),
+      });
+      if (osvFindings.length > 0) {
+        console.log(chalk.red(`  ⚠️  ${osvFindings.length} vulnerabilidade(s) catalogada(s) encontrada(s)!`));
+        osvFindings.forEach(logFinding);
+      } else {
+        console.log(chalk.green('  ✅ Nenhuma vulnerabilidade catalogada encontrada no OSV.dev.'));
+      }
+      allFindings.push(...osvFindings);
+    } catch (err) {
+      console.log(chalk.gray(`  (OSV.dev indisponível: ${err.message})`));
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  🔑 TESTES ATIVOS DE AUTENTICAÇÃO (rate limit, enumeração, política de senha)
+  // ══════════════════════════════════════════════════════════
+  // Só com --active: envia tentativas de login com credenciais falsas contra o
+  // próprio endpoint de login (poucas, sequenciais, nunca uma senha/usuário
+  // real — ver limites em cada função de active-rules.mjs).
+  if (activeMode && loginFormMeta?.actionUrl) {
+    console.log(chalk.magenta('\n🔑 Testes ativos de autenticação (rate limit, enumeração de usuário)...'));
+    const fieldNames = (loginFormMeta.userField || loginFormMeta.passField)
+      ? { user: loginFormMeta.userField || 'username', pass: loginFormMeta.passField || 'password' }
+      : null;
+    try {
+      const rateFindings = await checkRateLimit(context.request, loginFormMeta.actionUrl, fieldNames);
+      if (rateFindings.length > 0) { console.log(chalk.red(`  ⚠️  Sem rate limit aparente no login!`)); rateFindings.forEach(logFinding); }
+      else console.log(chalk.green('  ✅ Login parece ter alguma defesa contra tentativas repetidas.'));
+      allFindings.push(...rateFindings);
+    } catch (err) { console.log(chalk.gray(`  (rate limit: ${err.message})`)); }
+
+    try {
+      const enumFindings = await checkUserEnumeration(context.request, loginFormMeta.actionUrl, fieldNames);
+      if (enumFindings.length > 0) { console.log(chalk.yellow(`  ⚠️  Possível enumeração de usuário no login.`)); enumFindings.forEach(logFinding); }
+      else console.log(chalk.green('  ✅ Login não parece diferenciar "usuário inexistente" de "senha errada".'));
+      allFindings.push(...enumFindings);
+    } catch (err) { console.log(chalk.gray(`  (user enumeration: ${err.message})`)); }
+  }
+
+  // Política de senha — heurística passiva de UI, não precisa de --active
+  // (não envia nada, só lê o HTML da própria página de login já carregada).
+  if (pageHtmlContent) {
+    try {
+      const pwPolicyFindings = checkPasswordPolicyHints(pageHtmlContent);
+      if (pwPolicyFindings.length > 0) pwPolicyFindings.forEach(logFinding);
+      allFindings.push(...pwPolicyFindings);
+    } catch { /* heurística de UI, sem risco, mas não deixa derrubar a auditoria */ }
   }
 
   // ══════════════════════════════════════════════════════════
@@ -2663,41 +2481,9 @@ async function main() {
   process.exit(0);
 }
 
-// Chave de deduplicação. Problemas "de site" (headers, cookies, código, storage)
-// são colapsados ENTRE fases — o mesmo header ausente não deve contar 3x
-// (pré-login + login + pós-login). Eventos de rede/diff do login mantêm a fase.
-function dedupKey(f) {
-  const t = f.type;
-  if (['missing_security_header', 'weak_security_header', 'information_disclosure_header',
-       'cors_wildcard', 'cors_credentials', 'no_https'].includes(t)) {
-    return `${t}|${f.header || ''}`;                                   // posture do site, ignora fase+url
-  }
-  if (['cookie_insecure_flags', 'cookie_sensitive_no_httponly'].includes(t)) {
-    return `${t}|${f.cookieName || ''}|${f.domain || ''}`;            // por cookie, ignora fase
-  }
-  if (['storage_sensitive_data', 'storage_jwt_exposed'].includes(t)) {
-    return `${t}|${f.storage || ''}|${f.key || ''}`;
-  }
-  if (['exposed_key', 'dangerous_code', 'missing_sri', 'global_variable_sensitive',
-       'frontend_role_definition'].includes(t)) {
-    return `${t}|${f.url || ''}|${f.label || ''}|${f.match || f.src || ''}`; // por arquivo, ignora fase
-  }
-  if (['form_no_csrf', 'login_no_csrf'].includes(t)) {
-    return `${t}`;
-  }
-  // Demais (rede durante login, diffs, inventário): mantém a fase.
-  return `${t}|${f.phase || ''}|${f.key || f.cookieName || f.header || f.label || ''}|${f.storage || f.match || f.url || ''}`;
-}
-
-function deduplicateFindings(findings) {
-  const seen = new Set();
-  return findings.filter(f => {
-    const key = dedupKey(f);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
+// dedupKey/deduplicateFindings agora vivem em ./report/dedup.mjs (importados no
+// topo deste arquivo), para que o pipeline do daemon use exatamente a mesma
+// lógica — antes só este caminho deduplicava. Ver comentário lá.
 
 // Executar apenas se for o script principal (não quando importado pelo daemon)
 const isMain = process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('auditor.mjs');
