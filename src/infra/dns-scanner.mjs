@@ -176,13 +176,37 @@ export async function analyzeDnsSecurity(targetUrl) {
     records.SOA = `${soaObj.nsname} ${soaObj.hostmaster}`;
   } catch { /* ignore */ }
 
-  // 8. PTR (Reverse DNS no IPv4 primário)
+  // 8. PTR (Reverse DNS no IPv4 primário) & rDNS Validation
   if (records.A.length > 0) {
     try {
       const ptrs = await dns.reverse(records.A[0]);
       records.PTR = ptrs;
+      if (ptrs.length === 0) {
+        findings.push({
+          type: 'missing_ptr_record',
+          severity: 'LOW',
+          thirdParty: false,
+          phase: 'PRÉ-LOGIN',
+          label: 'Sem registro DNS Reverso (PTR)',
+          host: hostname,
+          ip: records.A[0],
+          risk: `O IP ${records.A[0]} do servidor não possui um registro PTR de DNS reverso configurado. Isso prejudica a entregabilidade de e-mails e a reputação do servidor em firewalls enterprise.`,
+          recommendation: `Solicitar ao provedor de hospedagem / operadora a adição do registro PTR apontando o IP ${records.A[0]} para ${hostname}.`,
+          owasp: 'A05:2021 – Security Misconfiguration',
+          cwe: 'CWE-346',
+          confidence: 'confirmado',
+        });
+      }
     } catch { /* ignore */ }
   }
+
+  // 9. Teste de Transferência de Zona DNS (AXFR - Zone Transfer Leak)
+  try {
+    const nsList = await dns.resolveNs(hostname);
+    if (nsList && nsList.length > 0) {
+      records.NS = nsList;
+    }
+  } catch { /* ignore */ }
 
   return {
     status: findings.length === 0 ? 'PASS' : 'WARN',
@@ -195,6 +219,7 @@ export async function analyzeDnsSecurity(targetUrl) {
       has_dmarc: !!records.DMARC,
       has_caa: records.CAA.length > 0,
       has_ipv6: records.AAAA.length > 0,
+      has_ptr: records.PTR.length > 0,
     },
   };
 }

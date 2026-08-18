@@ -20,6 +20,7 @@ export function generateEnterpriseMd({
 
   lines.push('# 🛡️ Sentinela — Relatório de Auditoria de Segurança');
   lines.push('');
+  if (meta.company) lines.push(`**Preparado por:** ${meta.company}${meta.client ? ` | **Cliente:** ${meta.client}` : ''}`);
   lines.push(`**Alvo:** ${meta.target}`);
   lines.push(`**Data:** ${new Date(meta.timestamp).toLocaleString('pt-BR')}`);
   lines.push(`**Páginas auditadas:** ${meta.pagesAudited}`);

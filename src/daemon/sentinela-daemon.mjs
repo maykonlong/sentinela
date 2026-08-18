@@ -195,6 +195,9 @@ async function generateFromSession(sessionId) {
 
   const reportMeta = {
     target: meta.target,
+    company: meta.options?.company || meta.company,
+    client: meta.options?.client || meta.client,
+    logo: meta.options?.logo || meta.logo,
     timestamp: new Date().toISOString(),
     pagesAudited: meta.pagesCount || 1,
     totalFindings: enriched.length,

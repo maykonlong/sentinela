@@ -87,17 +87,23 @@ async function cmdStart(targetUrl) {
   const activeMode = hasFlag('--active');
   const timeoutMin = parseInt(getFlag('--timeout') || '60', 10);
   const timeoutMs = timeoutMin * 60 * 1000;
+  const company = getFlag('--company');
+  const client = getFlag('--client');
+  const logo = getFlag('--logo');
 
   printBanner();
   console.log(chalk.white(`\n🎯 Alvo: ${chalk.cyan.bold(targetUrl)}`));
   console.log(chalk.white(`📂 Escopo: ${scope}${activeMode ? chalk.magenta(' + ATIVO') : ''}`));
+  if (company || client) {
+    console.log(chalk.white(`🏢 White-Label: ${chalk.green(company || 'Consultoria')} → ${chalk.yellow(client || 'Cliente')}`));
+  }
   console.log(chalk.white(`⏱️  Timeout: ${timeoutMin} minutos`));
   console.log(chalk.gray('\n  → Controle ao vivo: http://localhost:3141'));
   console.log(chalk.gray('  → Finalizar: node sentinela.mjs done'));
   console.log(chalk.gray('  → Ou: curl -X POST http://localhost:3141/finalize\n'));
 
   const { startDaemon } = await import('./src/daemon/sentinela-daemon.mjs');
-  await startDaemon(targetUrl, { scope, activeMode, timeoutMs });
+  await startDaemon(targetUrl, { scope, activeMode, timeoutMs, company, client, logo });
 }
 
 // ── Comando: done ─────────────────────────────────────────────

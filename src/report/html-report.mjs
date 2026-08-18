@@ -201,9 +201,15 @@ export function generateEnterpriseHtml({
   const highs = findings.filter(f => f.severity === 'HIGH');
   const topRisks = [...criticals, ...highs].slice(0, 3);
 
+  // Categorizar Quick Wins (< 5 minutos) vs Projetos Estruturais
+  const quickFixTypes = ['missing_security_header', 'password_autocomplete', 'missing_privacy_policy', 'missing_sri', 'missing_security_txt'];
+  const quickWins = findings.filter(f => quickFixTypes.includes(f.type));
+  const structuralFixes = findings.filter(f => !quickFixTypes.includes(f.type) && f.severity !== 'INFO');
+
   const execSummaryHtml = `
   <div class="section exec-summary">
     <h2>📊 Sumário Executivo</h2>
+    ${meta.company ? `<p style="font-size:12px;color:#38bdf8;font-weight:600;margin-bottom:6px">🏢 AUDITORIA PREPARADA POR: ${esc(meta.company)}${meta.client ? ` — CLIENTE: ${esc(meta.client)}` : ''}</p>` : ''}
     <p>A auditoria de segurança do site <a href="${esc(meta.target)}" target="_blank" class="highlight">${esc(meta.target)}</a> identificou 
     <span class="highlight">${meta.firstPartyIssues} problema(s)</span> no seu código/configuração, 
     resultando em uma nota de <span class="highlight">${score}/100 (${grade} — ${gradeLabel})</span>.</p>
@@ -215,6 +221,18 @@ export function generateEnterpriseHtml({
     <ol>${topRisks.map(f => `<li><strong>[${f.severity}]</strong> ${esc(f.label || f.type)}${f.risk ? ` — ${esc(f.risk.substring(0, 120))}${f.risk.length > 120 ? '…' : ''}` : ''}</li>`).join('')}</ol>
     ` : '<p style="color:#2f9e44">✅ Nenhum problema crítico ou alto encontrado.</p>'}
     
+    <h3>⚡ Matriz de Esforço × Impacto (Plano de Ação)</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:12px;margin:10px 0">
+      <div style="background:#ebfbee;border-left:3px solid #2f9e44;padding:10px 12px;border-radius:6px">
+        <b style="color:#2b5c34;font-size:12px">⚡ Ganhas-Rápidos (Quick Fixes < 5 min):</b>
+        <p style="font-size:12px;color:#2b5c34;margin:4px 0">${quickWins.length} item(ns) corrigíveis via configuração de servidor ou ajuste de 1 linha de HTML (ex.: Headers de Segurança, Autocomplete, Política de Privacidade).</p>
+      </div>
+      <div style="background:#fff4e6;border-left:3px solid #e8590c;padding:10px 12px;border-radius:6px">
+        <b style="color:#e8590c;font-size:12px">🛠️ Remediação Estrutural (Projetos Dev/Infra):</b>
+        <p style="font-size:12px;color:#d9480f;margin:4px 0">${structuralFixes.length} item(ns) requerem ajuste em regras de firewall, refatoração de código backend ou autorização por objeto (IDOR).</p>
+      </div>
+    </div>
+
     <p style="margin-top:12px;font-size:12px;color:#868e96">Auditoria realizada em ${new Date(meta.timestamp).toLocaleString('pt-BR')} · ${meta.pagesAudited} página(s) · Fases: PRÉ-LOGIN → LOGIN → PÓS-LOGIN</p>
   </div>`;
 

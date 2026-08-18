@@ -41,6 +41,9 @@ import { analyzeDnsSecurity } from './infra/dns-scanner.mjs';
 // Módulo LGPD & Compliance de Privacidade
 import { analyzeUrlPii, analyzeStoragePii, analyzeLgpdPage, analyzeTrackingBeforeConsent } from './rules/lgpd-rules.mjs';
 
+// Módulo APIs, Nuvem & Isolamento Cross-Origin
+import { checkGraphQlIntrospection, checkCloudBucketExposure, checkWebSocketSecurity, checkCrossOriginIsolation } from './rules/api-cloud-rules.mjs';
+
 // Geradores de testes e verificação manual
 import { generateTestArtifacts } from './generators/test-generator.mjs';
 import { enrichWithVerification } from './generators/manual-verification.mjs';
@@ -2540,6 +2543,31 @@ async function main() {
     }
   } catch (err) {
     console.log(chalk.gray(`  (LGPD check error: ${err.message})`));
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  ⚡ MÓDULO APIS, NUVEM & ISOLAMENTO CROSS-ORIGIN
+  // ══════════════════════════════════════════════════════════
+  try {
+    const gqlFindings = await checkGraphQlIntrospection(context.request, targetUrl);
+    const bucketFindings = checkCloudBucketExposure(pageHtmlContent, capturedRoutes.map(r => r.url), targetUrl);
+    const wsFindings = checkWebSocketSecurity(capturedRoutes, targetUrl);
+
+    const mainRespHeaders = navResponse ? navResponse.headers() : {};
+    const coopFindings = checkCrossOriginIsolation(mainRespHeaders, targetUrl);
+
+    const apiCloudFindings = [...gqlFindings, ...bucketFindings, ...wsFindings, ...coopFindings].map(f => ({
+      ...f,
+      phase: f.phase || 'PRÉ-LOGIN',
+    }));
+
+    if (apiCloudFindings.length > 0) {
+      console.log(chalk.magenta(`\n  ⚡ Módulo APIs, Nuvem & Isolamento: ${apiCloudFindings.length} achado(s)`));
+      apiCloudFindings.forEach(logFinding);
+      allFindings.push(...apiCloudFindings);
+    }
+  } catch (err) {
+    console.log(chalk.gray(`  (API/Cloud check error: ${err.message})`));
   }
 
   // Classificar por origem qualquer finding (rede etc.) ainda sem rótulo de parte.
