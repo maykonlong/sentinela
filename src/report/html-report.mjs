@@ -419,9 +419,9 @@ export function generateEnterpriseHtml({
       ${f.risk ? `<div class="frisk">${esc(f.risk)}</div>` : ''}
       ${f.recommendation ? `<div class="frec"><b>✅ Correção:</b> ${esc(f.recommendation)}</div>` : ''}
       ${mv ? `<div class="verify">
-        <div class="verify-title">🧪 Como Verificar Manualmente</div>
+        <div class="verify-title">🧪 Como Verificar Manualmente & Provar para a Gestão</div>
         <ol>${mv.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
-        ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools:</b> ${esc(mv.devtools)}</p>` : ''}
+        ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools (Interface Visual):</b> ${esc(mv.devtools)}</p>` : ''}
         ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Teste Focado):</p>
         <div class="cmd-wrapper">
           <span class="cmd">${esc(mv.automated)}</span>
@@ -432,6 +432,11 @@ export function generateEnterpriseHtml({
           <span class="cmd cmd-pow">${esc(mv.proofOfWork)}</span>
           <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar</button>
         </div>` : ''}
+        <div style="margin-top:8px;padding:8px 10px;background:#e7f5ff;border-left:3px solid #1c7ed6;border-radius:4px;font-size:12px;color:#1864ab">
+          <b>💡 Como Apresentar a Prova ao Gestor/Diretoria:</b><br>
+          • <b>Se o comando retornar o dado/header ou "succeeded":</b> A falha é <b>REAL E CONFIRMADA</b>. O atacante consegue visualizar/explorar este item diretamente.<br>
+          • <b>Se o comando retornar vazio ou "Connection refused":</b> O item foi <b>CORRIGIDO/PROTEGIDO</b> com sucesso.
+        </div>
       </div>` : ''}
     </div>`;
   };

@@ -523,6 +523,43 @@ const VERIFICATION_MAP = {
     };
   },
 
+  password_autocomplete: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Auto-preenchimento de Senha (autocomplete)`,
+      steps: [
+        `1. Teste focado: Inspecionar no HTML da página a tag <input type="password"> para verificar se os atributos 'autocomplete="off"' ou 'autocomplete="new-password"' estão ausentes.`,
+        `2. PROVA REAL (Executar comando): O comando abaixo busca a tag do campo de senha no HTML da página.`,
+        `   → Se a saída mostrar '<input type="password">' SEM 'autocomplete="off"', A VULNERABILIDADE É REAL E CONFIRMADA (o navegador salvará/preencherá a senha automaticamente).`,
+        `   → Se a saída mostrar 'autocomplete="off"' ou 'autocomplete="new-password"', o campo está devidamente protegido.`,
+      ],
+      devtools: `F12 → Elements → Ctrl+F → buscar "<input" e conferir se há tipo password sem autocomplete.`,
+      automated: `curl -sk "${url}" | grep -iE "<input.*password"`,
+      proofOfWork: `curl -sk "${url}" | grep -n -C 3 -i "password"`,
+    };
+  },
+
+  exposed_port: (f, targetUrl) => {
+    const host = f.host || '10.4.0.20';
+    const port = f.port || 5432;
+    const isWeb = [80, 443, 3000, 8000, 8080, 8443].includes(Number(port));
+    const testCmd = isWeb 
+      ? `curl -skD - "http://${host}:${port}" -o /dev/null`
+      : `nc -vv -w 3 ${host} ${port}`;
+    return {
+      title: `Validação & Prova Real para Porta ${port} (${f.service || 'Serviço Exposto'})`,
+      steps: [
+        `1. Teste focado: Testar a abertura direta do socket TCP na porta ${port} do servidor ${host}.`,
+        `2. PROVA REAL (Executar comando):`,
+        `   → Se a saída retornar "succeeded!" ou HTTP 200/302, A PORTA ESTÁ ABERTA E EXPOSTA PARA A INTERNET INTEIRA.`,
+        `   → Se retornar "Connection refused" ou "timed out", a porta está devidamente fechada/protegida pelo firewall.`,
+      ],
+      devtools: `Terminal / Prompt de Comando / WSL (nc ou curl).`,
+      automated: testCmd,
+      proofOfWork: testCmd,
+    };
+  },
+
   // ════════════════════════════════════════════════════
   // REDE / MISCELÂNEA
   // ════════════════════════════════════════════════════
