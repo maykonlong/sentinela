@@ -1,5 +1,5 @@
 import dns from 'dns/promises';
-import { net } from 'net';
+import net from 'net';
 
 /**
  * Deep DNS Security Scanner — Sentinela v2.2
