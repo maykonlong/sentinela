@@ -422,15 +422,20 @@ export function generateEnterpriseHtml({
         <div class="verify-title">🧪 Como Verificar Manualmente & Provar para a Gestão</div>
         <ol>${mv.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
         ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools (Interface Visual):</b> ${esc(mv.devtools)}</p>` : ''}
-        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Teste Focado):</p>
+        ${mv.consoleSnippet ? `<p style="margin-top:6px;font-weight:600;color:#212529">🖥️ Teste via Console do Navegador (F12 → Console):</p>
+        <div class="cmd-wrapper">
+          <span class="cmd" style="color:#67e8f9;background:#0f172a">${esc(mv.consoleSnippet)}</span>
+          <button class="btn-copy" onclick="copyText('${esc(mv.consoleSnippet)}', this)">📋 Copiar Snippet Console</button>
+        </div>` : ''}
+        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Terminal cURL/nc):</p>
         <div class="cmd-wrapper">
           <span class="cmd">${esc(mv.automated)}</span>
-          <button class="btn-copy" onclick="copyText('${esc(mv.automated)}', this)">📋 Copiar</button>
+          <button class="btn-copy" onclick="copyText('${esc(mv.automated)}', this)">📋 Copiar Terminal</button>
         </div>` : ''}
         ${mv.proofOfWork ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Prova Real (Dump Completo):</p>
         <div class="cmd-wrapper">
           <span class="cmd cmd-pow">${esc(mv.proofOfWork)}</span>
-          <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar</button>
+          <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar Dump</button>
         </div>` : ''}
         <div style="margin-top:8px;padding:8px 10px;background:#e7f5ff;border-left:3px solid #1c7ed6;border-radius:4px;font-size:12px;color:#1864ab">
           <b>💡 Como Apresentar a Prova ao Gestor/Diretoria:</b><br>

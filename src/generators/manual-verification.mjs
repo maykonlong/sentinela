@@ -107,13 +107,13 @@ const VERIFICATION_MAP = {
   cookie_sensitive_no_httponly: (f) => ({
     title: `Validação & Prova Real para HttpOnly no Cookie "${f.cookieName}"`,
     steps: [
-      `1. Teste via Console: Executar \`document.cookie\` no Console do navegador.`,
-      `   → PROVA REAL: Se o cookie "${f.cookieName}" aparecer na string impressa, ele NÃO TEM HttpOnly (Vulnerável).`,
-      `   → Se não aparecer, o cookie está protegido com HttpOnly.`,
+      `1. Teste via Console: Abrir F12 → Console e cole o snippet fornecido.`,
+      `2. PROVA REAL: Se o cookie "${f.cookieName}" for retornado, ele NÃO TEM a proteção HttpOnly (vazio se seguro).`,
     ],
     devtools: `F12 → Application → Cookies → "${f.cookieName}" → coluna HttpOnly.`,
-    automated: `document.cookie.includes("${f.cookieName}")`,
-    proofOfWork: `console.log(document.cookie)`,
+    consoleSnippet: `document.cookie.split('; ').filter(c => c.startsWith('${f.cookieName}='))`,
+    automated: `curl -skD - "${f.url || 'https://10.4.0.20:8443'}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
+    proofOfWork: `curl -skD - "${f.url || 'https://10.4.0.20:8443'}" -o /dev/null | grep -i "Set-Cookie"`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -123,10 +123,11 @@ const VERIFICATION_MAP = {
   storage_sensitive_data: (f) => ({
     title: `Validação & Prova Real para Dados Sensíveis no ${f.storage || 'localStorage'}`,
     steps: [
-      `1. Teste focado: Inspecionar o item específico "${f.key}".`,
-      `2. PROVA REAL: Imprimir o armazenamento completo no Console para verificar se há outros dados vazados.`,
+      `1. Teste via Console: Abrir F12 → Console e executar o comando abaixo.`,
+      `2. PROVA REAL: Imprime a tabela completa de chaves e valores armazenados no navegador.`,
     ],
     devtools: `F12 → Application → ${f.storage || 'Local Storage'} → inspecionar tabela.`,
+    consoleSnippet: `console.table(Object.entries(${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}))`,
     automated: `${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}")`,
     proofOfWork: `console.table(Object.entries(${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}))`,
   }),
@@ -134,10 +135,11 @@ const VERIFICATION_MAP = {
   storage_jwt_exposed: (f) => ({
     title: `Validação & Prova Real para JWT no ${f.storage || 'localStorage'}`,
     steps: [
-      `1. Teste focado: Ler o token da chave "${f.key}".`,
-      `2. PROVA REAL: Decodificar o payload Base64 do JWT e imprimir as claims diretamente.`,
+      `1. Teste via Console: Abrir F12 → Console e cole o código para decodificar o token instantaneamente.`,
+      `2. PROVA REAL: Exibe os dados internos do usuário (permissões, ID, expiração) extraídos do token sem precisar de senha.`,
     ],
     devtools: `F12 → Application → ${f.storage || 'Local Storage'} → "${f.key}" → copiar token e colar em jwt.io.`,
+    consoleSnippet: `JSON.parse(atob((${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}") || '').split('.')[1]))`,
     automated: `JSON.parse(atob(localStorage.getItem("${f.key}").split('.')[1]))`,
     proofOfWork: `console.log(JSON.parse(atob(localStorage.getItem("${f.key}").split('.')[1])))`,
     online: `https://jwt.io`,
@@ -166,10 +168,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para "${f.match || 'innerHTML'}"`,
       steps: [
-        `1. Teste focado: Localizar o uso de ${f.match || 'innerHTML'} no arquivo ${f.url || url}.`,
-        `2. PROVA REAL: Exibir as linhas com contexto (-C 3) para validar a falta de sanitização antes da atribuição.`,
+        `1. Teste via Console: Abrir F12 → Console e rodar o snippet para listar elementos com HTML injetado.`,
+        `2. PROVA REAL: Exibe no console os seletores e nós do DOM alterados via innerHTML sem sanitização.`,
       ],
       devtools: `F12 → Sources → Ctrl+Shift+F → buscar "${f.match || 'innerHTML'}".`,
+      consoleSnippet: `document.querySelectorAll('*').forEach(el => { if (el.children.length === 0 && el.innerHTML.includes('<')) console.log(el); })`,
       automated: `curl -sk "${url}" | grep -n "${f.match || 'innerHTML'}"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 3 "${f.match || 'innerHTML'}"`,
     };
@@ -184,6 +187,7 @@ const VERIFICATION_MAP = {
         `2. PROVA REAL: Imprimir todas as tags script externas e verificar quais possuem o atributo \`integrity\`.`,
       ],
       devtools: `F12 → Elements → Ctrl+F → buscar o arquivo script.`,
+      consoleSnippet: `Array.from(document.scripts).filter(s => s.src && !s.integrity).map(s => s.src)`,
       automated: `curl -sk "${url}" | grep -i "${f.src || 'script'}"`,
       proofOfWork: `curl -sk "${url}" | grep -iE "<script"`,
       online: `https://www.srihash.org/`,
@@ -197,6 +201,7 @@ const VERIFICATION_MAP = {
       `2. PROVA REAL: Inspecionar no Console todas as propriedades de \`window\` ou estado global.`,
     ],
     devtools: `F12 → Console → digitar o nome da variável.`,
+    consoleSnippet: `console.dir(window.${f.variable || 'user'})`,
     automated: `${f.variable || 'window'}`,
     proofOfWork: `console.dir(${f.variable || 'window'})`,
   }),
@@ -514,10 +519,11 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para CSRF em Formulário`,
       steps: [
-        `1. Teste focado: Buscar tokens ocultos no formulário.`,
+        `1. Teste focado: Buscar tokens ocultos no formulário via Console ou terminal.`,
         `2. PROVA REAL: Tentar submeter o formulário via POST sem enviar token/cookie CSRF e verificar se o servidor aceita a ação (HTTP 200/302).`,
       ],
       devtools: `F12 → Elements → inspecionar o formulário.`,
+      consoleSnippet: `Array.from(document.forms).map(f => ({ action: f.action, method: f.method, csrfInputs: Array.from(f.querySelectorAll('input[type="hidden"]')).filter(i => /csrf|token|nonce/i.test(i.name || i.id)) }))`,
       automated: `curl -sk "${url}" | grep -iE "csrf|_token|nonce"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 5 -i "<form"`,
     };
@@ -528,12 +534,13 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Auto-preenchimento de Senha (autocomplete)`,
       steps: [
-        `1. Teste focado: Inspecionar no HTML da página a tag <input type="password"> para verificar se os atributos 'autocomplete="off"' ou 'autocomplete="new-password"' estão ausentes.`,
-        `2. PROVA REAL (Executar comando): O comando abaixo busca a tag do campo de senha no HTML da página.`,
+        `1. Teste via Console: Execute o snippet no Console para listar todas as tags de senha e seus atributos.`,
+        `2. PROVA REAL (Executar comando): O comando de terminal busca a tag do campo de senha no HTML da página.`,
         `   → Se a saída mostrar '<input type="password">' SEM 'autocomplete="off"', A VULNERABILIDADE É REAL E CONFIRMADA (o navegador salvará/preencherá a senha automaticamente).`,
         `   → Se a saída mostrar 'autocomplete="off"' ou 'autocomplete="new-password"', o campo está devidamente protegido.`,
       ],
       devtools: `F12 → Elements → Ctrl+F → buscar "<input" e conferir se há tipo password sem autocomplete.`,
+      consoleSnippet: `Array.from(document.querySelectorAll('input[type="password"]')).map(i => ({ name: i.name, id: i.id, autocomplete: i.getAttribute('autocomplete') || 'AUSENTE (Inseguro)' }))`,
       automated: `curl -sk "${url}" | grep -iE "<input.*password"`,
       proofOfWork: `curl -sk "${url}" | grep -n -C 3 -i "password"`,
     };
