@@ -50,30 +50,39 @@ import { exportPdf } from './report/pdf-export.mjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ─── Configuração ──────────────────────────────────────────
+// ─── Configuração Global ───────────────────────────────────
 
-const args = process.argv.slice(2);
-const targetUrl = args.find(a => a.startsWith('http'));
-const shouldCrawl = args.includes('--crawl');
-let activeMode = args.includes('--active'); // Tier 3: testes ativos (opt-in)
-const assumeYes = args.includes('--yes') || args.includes('-y');
-const recordHar = !args.includes('--no-har'); // exporta HAR por padrão (Burp/ZAP)
+let args = process.argv.slice(2);
+let targetUrl = args.find(a => a.startsWith('http'));
+let shouldCrawl = args.includes('--crawl');
+let activeMode = args.includes('--active');
+let assumeYes = args.includes('--yes') || args.includes('-y');
+let recordHar = !args.includes('--no-har');
+let scope = null;
+let loginTimeout = 300000;
+let navIdleMs = 180000;
 
-// Escopo da auditoria: 'login' | 'single' | 'navigate' | 'crawl'
-//   login    = só a página de login (pré-login), não espera login
-//   single   = login + audita a página pós-login atual (padrão)
-//   navigate = login + audita CADA página que você visitar (até apertar ENTER)
-//   crawl    = login + audita atual + segue links internos automaticamente
-const scopeArg = args.find(a => a.startsWith('--scope='));
-let scope = scopeArg ? scopeArg.split('=')[1] : null;
-if (!scope && shouldCrawl) scope = 'crawl';
-if (!scope && args.includes('--navigate')) scope = 'navigate';
-if (!scope && args.includes('--login-only')) scope = 'login';
-const timeoutArg = args.find(a => a.startsWith('--timeout'));
-const loginTimeout = timeoutArg ? parseInt(timeoutArg.split('=')[1] || args[args.indexOf('--timeout') + 1]) * 1000 : 300000; // 5min padrão
-// Modo navegação: para sozinho após N segundos SEM abrir página nova (padrão 180s).
-const idleArg = args.find(a => a.startsWith('--idle'));
-const navIdleMs = idleArg ? parseInt(idleArg.split('=')[1] || args[args.indexOf('--idle') + 1]) * 1000 : 180000;
+function parseConfiguration() {
+  args = process.argv.slice(2);
+  targetUrl = args.find(a => a.startsWith('http'));
+  shouldCrawl = args.includes('--crawl');
+  activeMode = args.includes('--active');
+  assumeYes = args.includes('--yes') || args.includes('-y');
+  recordHar = !args.includes('--no-har');
+
+  const scopeArg = args.find(a => a.startsWith('--scope='));
+  scope = scopeArg ? scopeArg.split('=')[1] : null;
+  if (!scope && shouldCrawl) scope = 'crawl';
+  if (!scope && args.includes('--navigate')) scope = 'navigate';
+  if (!scope && args.includes('--login-only')) scope = 'login';
+  if (!scope) scope = 'single';
+
+  const timeoutArg = args.find(a => a.startsWith('--timeout'));
+  loginTimeout = timeoutArg ? parseInt(timeoutArg.split('=')[1] || args[args.indexOf('--timeout') + 1]) * 1000 : 300000;
+
+  const idleArg = args.find(a => a.startsWith('--idle'));
+  navIdleMs = idleArg ? parseInt(idleArg.split('=')[1] || args[args.indexOf('--idle') + 1]) * 1000 : 180000;
+}
 
 if (!targetUrl) {
   console.log(chalk.red('\n❌ URL não informada!\n'));
@@ -1710,6 +1719,7 @@ function issueToFinding(issue) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
+  parseConfiguration();
   printBanner();
 
   console.log(chalk.white(`\n🎯 Alvo: ${chalk.cyan.bold(targetUrl)}`));
