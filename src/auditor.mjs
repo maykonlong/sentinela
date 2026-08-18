@@ -204,6 +204,12 @@ export async function runAudit(url, opts = {}, hooks = null, finalizePromise = n
 // Snapshots para comparação before/after login
 let storageSnapshotBefore = { localStorage: {}, sessionStorage: {} };
 let cookieSnapshotBefore = [];
+let auditTimeline = [];
+
+function addTimeline(text, type = 'info') {
+  const time = new Date().toLocaleTimeString('pt-BR');
+  auditTimeline.push({ time, text, type });
+}
 
 try {
   pageOrigin = new URL(targetUrl).origin;
@@ -2149,6 +2155,7 @@ async function main() {
       dnsFindings.forEach(logFinding);
       allFindings.push(...dnsFindings);
     }
+    addTimeline(`Varredura de infraestrutura e recon concluídos: IP ${infraData.geoip?.ip || '?'}, ${infraData.tcpScan?.open_count || 0} portas abertas, timing ${infraData.socketTiming?.total_ms || 0}ms.`);
     console.log(chalk.green(`  🏗️ Infraestrutura auditada: IP ${infraData.geoip?.ip || '?'}, ${infraData.tcpScan?.open_count || 0} portas abertas, timing ${infraData.socketTiming?.total_ms || 0}ms`));
   }
 
@@ -2234,6 +2241,7 @@ async function main() {
       clearInterval(poller);
       clearTimeout(maxTimer);
       try { process.stdin.pause(); } catch {}
+      addTimeline(`Finalização da coleta de dados (${reason}). Compilando relatórios empresariais...`);
       console.log(chalk.green(`\n  ▶️  Finalizando coleta (${reason}).`));
       resolve();
     };
@@ -2456,6 +2464,7 @@ async function main() {
       const url = frame.url();
       if (!url || !url.startsWith('http') || visitedUrls.has(url)) return;
       visitedUrls.add(url);
+      addTimeline(`Página visitada e auditada: ${url}`);
       console.log(chalk.cyan(`\n🔍 Auditando nova página visitada: ${url}`));
       try {
         await page.waitForTimeout(1000); // Aguardar render/SPA

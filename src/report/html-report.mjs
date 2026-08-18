@@ -1,57 +1,78 @@
 /**
- * HTML Report Generator — Relatório empresarial completo
- *
- * Gera relatório HTML profissional com:
- * - Capa com selo A/B/C/D/F
- * - Sumário executivo (linguagem C-level)
- * - Seção de infraestrutura (portas, timing, GeoIP, reputação)
- * - Score breakdown visual por categoria
- * - Achados com "Como Verificar Manualmente" e snippets de correção
- * - Tabela de cookies e headers detalhada
- * - Screenshots embeddadas (base64)
- * - Timeline da auditoria
- * - Testes gerados
- * - Apêndice com glossário e metodologia
+ * HTML Report Generator — Relatório empresarial moderno
+ * 
+ * Gera um HTML completo, responsivo e interativo com:
+ *  - Capa executiva com selo A-F e nota
+ *  - Sumário Executivo para C-level
+ *  - Infraestrutura completa (IP, GeoIP, Socket timing, Portas TCP, Reputação DNSBL)
+ *  - Registros DNS de Segurança (SPF, DMARC, CAA, IPv6)
+ *  - Score breakdown por categoria com barras visuais
+ *  - Achados agrupados por OWASP com instruções de verificação manual (Prova Real + Teste Focado)
+ *  - Botões de copiar em 1 clique para TODOS os comandos, portas e rotas
+ *  - Links clicáveis em todas as URLs e endpoints
+ *  - Screenshots da auditoria
+ *  - Timeline detalhada
+ *  - Artefatos de teste gerados (Playwright, cURL, Nginx, Apache)
+ *  - Apêndice com metodologia, glossário e aviso legal
  */
 
 function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
-const SEV_COLOR = { CRITICAL: '#c92a2a', HIGH: '#e8590c', MEDIUM: '#f08c00', LOW: '#1c7ed6', INFO: '#868e96' };
-const SEV_EMOJI = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🔵', INFO: 'ℹ️' };
+const SEV_COLOR = {
+  CRITICAL: '#c92a2a',
+  HIGH:     '#e8590c',
+  MEDIUM:   '#f08c00',
+  LOW:      '#1c7ed6',
+  INFO:     '#868e96',
+};
 
-function card(label, val, color) {
-  return `<div class="card"><div class="num" style="color:${color}">${val}</div><div class="lbl">${label}</div></div>`;
-}
+const SEV_EMOJI = {
+  CRITICAL: '🔴',
+  HIGH:     '🟠',
+  MEDIUM:   '🟡',
+  LOW:      '🔵',
+  INFO:     'ℹ️',
+};
 
 /**
- * Gera o relatório HTML empresarial completo.
+ * Gera o HTML empresarial standalone do relatório.
  */
 export function generateEnterpriseHtml({
   meta, findings, thirdParty, routes, pagesVisited, inventory,
-  scoreBreakdown, infraData, testArtifacts, screenshots, timeline,
+  scoreBreakdown, infraData, screenshots, timeline, testArtifacts,
   regression, counts, evidenceOf,
 }) {
   const score = scoreBreakdown.totalScore;
   const grade = scoreBreakdown.grade;
-  const gradeColor = scoreBreakdown.gradeColor;
   const gradeLabel = scoreBreakdown.gradeLabel;
+  const gradeColor = scoreBreakdown.gradeColor;
+
+  const card = (label, val, color) => `
+    <div class="card">
+      <div class="num" style="color:${color}">${val}</div>
+      <div class="lbl">${label}</div>
+    </div>`;
 
   // ── CSS ──
-  const css = `
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Inter', -apple-system, Segoe UI, Roboto, sans-serif; background: #f8f9fa; color: #212529; line-height: 1.5; }
-    .wrap { max-width: 1060px; margin: 0 auto; padding: 24px; }
+  const css = `<style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f4f5f7; color: #212529; margin: 0; padding: 20px; line-height: 1.5; font-size: 14px; }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    a { color: #1c7ed6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     
     /* ── Capa ── */
     .cover { background: linear-gradient(135deg, #1a1b1e 0%, #2c2e33 100%); color: #fff; border-radius: 16px; padding: 36px; display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; margin-bottom: 24px; box-shadow: 0 4px 24px rgba(0,0,0,.15); }
     .cover h1 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
-    .cover .target { color: #adb5bd; font-size: 13px; word-break: break-all; }
+    .cover .target { color: #38bdf8; font-size: 14px; word-break: break-all; font-weight: 600; }
     .cover .info { color: #868e96; font-size: 12px; margin-top: 4px; }
     .grade-badge { text-align: center; min-width: 140px; }
     .grade-badge .letter { font-size: 64px; font-weight: 900; line-height: 1; }
@@ -92,8 +113,8 @@ export function generateEnterpriseHtml({
     .infra-card .ic-value { font-size: 16px; font-weight: 600; }
     .timing-bar { display: flex; gap: 2px; height: 24px; border-radius: 4px; overflow: hidden; margin: 10px 0; }
     .timing-bar div { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; min-width: 30px; }
-    .port-table { font-size: 12px; }
-    .port-table td, .port-table th { padding: 5px 8px; }
+    .port-table { font-size: 12px; width: 100%; border-collapse: collapse; }
+    .port-table td, .port-table th { padding: 8px 10px; border-bottom: 1px solid #e9ecef; }
     .port-open { color: #2f9e44; font-weight: 600; }
     .port-closed { color: #868e96; }
     .port-filtered { color: #f08c00; }
@@ -112,13 +133,25 @@ export function generateEnterpriseHtml({
     .fevid { font-size: 12px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 8px 12px; margin: 6px 0; }
     .fevid ul { margin: 4px 0 0; padding-left: 18px; } .fevid code { word-break: break-all; font-size: 11px; }
     
-    /* ── Verificação Manual ── */
-    .verify { background: #fff4e6; border: 1px solid #ffe8cc; border-radius: 8px; padding: 10px 14px; margin: 8px 0; font-size: 12px; }
+    /* ── Verificação Manual & Comandos ── */
+    .verify { background: #fff4e6; border: 1px solid #ffe8cc; border-radius: 8px; padding: 12px 14px; margin: 8px 0; font-size: 12px; }
     .verify-title { font-weight: 600; color: #e8590c; margin-bottom: 6px; font-size: 12px; }
     .verify ol { padding-left: 20px; margin: 4px 0; }
     .verify li { margin: 2px 0; }
-    .verify .cmd { background: #1a1b1e; color: #51cf66; padding: 6px 10px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 11px; margin: 4px 0; display: block; word-break: break-all; }
     
+    .cmd-wrapper { position: relative; margin: 6px 0; }
+    .cmd { background: #1a1b1e; color: #51cf66; padding: 8px 36px 8px 12px; border-radius: 6px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 11px; display: block; word-break: break-all; white-space: pre-wrap; line-height: 1.5; }
+    .cmd-pow { color: #69db7c; border-left: 3px solid #51cf66; }
+    
+    /* ── Botão Copiar ── */
+    .btn-copy { position: absolute; right: 6px; top: 6px; background: rgba(255,255,255,0.15); border: none; color: #fff; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; transition: all .2s; font-family: sans-serif; display: flex; align-items: center; gap: 4px; }
+    .btn-copy:hover { background: rgba(255,255,255,0.3); }
+    .btn-copy.copied { background: #2f9e44; color: #fff; }
+    
+    .btn-action { background: #1c7ed6; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 500; transition: background .2s; }
+    .btn-action:hover { background: #1971c2; }
+    .btn-action.copied { background: #2f9e44; }
+
     /* ── Tabelas ── */
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { padding: 8px 10px; border-bottom: 1px solid #f1f3f5; text-align: left; }
@@ -127,21 +160,22 @@ export function generateEnterpriseHtml({
     
     /* ── Screenshots ── */
     .screenshots { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px; }
-    .screenshot { border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .screenshot { border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); border: 1px solid #e9ecef; }
     .screenshot img { width: 100%; display: block; }
-    .screenshot .ss-label { font-size: 11px; color: #868e96; padding: 6px 10px; background: #f8f9fa; }
+    .screenshot .ss-label { font-size: 11px; color: #495057; padding: 8px 12px; background: #f8f9fa; word-break: break-all; }
     
     /* ── Timeline ── */
-    .timeline { border-left: 2px solid #e9ecef; padding-left: 16px; }
-    .tl-item { margin: 8px 0; position: relative; }
-    .tl-item::before { content: ''; position: absolute; left: -21px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: #868e96; }
+    .timeline { border-left: 2px solid #e9ecef; padding-left: 16px; margin: 12px 0; }
+    .tl-item { margin: 10px 0; position: relative; font-size: 13px; }
+    .tl-item::before { content: ''; position: absolute; left: -21px; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: #1c7ed6; }
     .tl-item.tl-warn::before { background: #f08c00; }
     .tl-item.tl-error::before { background: #c92a2a; }
-    .tl-time { font-size: 11px; color: #868e96; font-family: monospace; }
-    .tl-text { font-size: 12px; }
+    .tl-time { font-size: 11px; color: #868e96; font-family: monospace; margin-right: 6px; font-weight: 600; }
+    .tl-text { font-size: 12px; color: #343a40; }
     
     /* ── Código ── */
-    .code-block { background: #1a1b1e; color: #c1c2c5; border-radius: 8px; padding: 14px 16px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; overflow-x: auto; white-space: pre; margin: 8px 0; line-height: 1.6; }
+    .code-block-wrapper { position: relative; margin: 10px 0; }
+    .code-block { background: #1a1b1e; color: #c1c2c5; border-radius: 8px; padding: 14px 16px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; overflow-x: auto; white-space: pre; line-height: 1.6; }
     
     /* ── Nota / Alerta ── */
     .note { background: #fff3bf; border: 1px solid #ffe066; border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #664d03; margin: 16px 0; }
@@ -158,6 +192,7 @@ export function generateEnterpriseHtml({
       .cover { box-shadow: none; }
       .section { box-shadow: none; page-break-inside: avoid; }
       .finding { page-break-inside: avoid; }
+      .btn-copy, .btn-action { display: none; }
     }
   </style>`;
 
@@ -169,7 +204,7 @@ export function generateEnterpriseHtml({
   const execSummaryHtml = `
   <div class="section exec-summary">
     <h2>📊 Sumário Executivo</h2>
-    <p>A auditoria de segurança do site <span class="highlight">${esc(meta.target)}</span> identificou 
+    <p>A auditoria de segurança do site <a href="${esc(meta.target)}" target="_blank" class="highlight">${esc(meta.target)}</a> identificou 
     <span class="highlight">${meta.firstPartyIssues} problema(s)</span> no seu código/configuração, 
     resultando em uma nota de <span class="highlight">${score}/100 (${grade} — ${gradeLabel})</span>.</p>
     
@@ -225,15 +260,26 @@ export function generateEnterpriseHtml({
       <p style="font-size:11px;color:#868e96;text-align:center">Total: ${timing.total_ms}ms · ${timing.total_bytes ? (timing.total_bytes / 1024).toFixed(1) + ' KB' : ''}</p>
     ` : `<p style="color:#c92a2a">⚠️ Medição de timing falhou${timing.error ? ': ' + esc(timing.error) : ''}</p>`;
 
-    // Portas abertas
+    // Portas abertas com botões interativos de teste/cópia
     const openPorts = (tcp.ports || []).filter(p => p.state === 'OPEN');
+    const targetHost = geo.ip || timing.ip || '10.4.0.20';
     const portTableHtml = openPorts.length > 0 ? `
       <table class="port-table">
-        <thead><tr><th>Porta</th><th>Serviço</th><th>Estado</th><th>Latência</th></tr></thead>
-        <tbody>${openPorts.map(p => `<tr>
-          <td><strong>${p.port}</strong></td><td>${esc(p.service)}</td>
-          <td class="port-open">OPEN</td><td>${p.latency_ms}ms</td>
-        </tr>`).join('')}</tbody>
+        <thead><tr><th>Porta</th><th>Serviço</th><th>Estado</th><th>Latência</th><th>Ação de Teste</th></tr></thead>
+        <tbody>${openPorts.map(p => {
+          const testCmd = p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000
+            ? `curl -skD - "http${p.port === 443 || p.port === 8443 ? 's' : ''}://${targetHost}:${p.port}" -o /dev/null`
+            : `nc -vv -w 3 ${targetHost} ${p.port}`;
+          return `<tr>
+          <td><strong>${p.port}</strong></td>
+          <td>${esc(p.service)}</td>
+          <td class="port-open">OPEN</td>
+          <td>${p.latency_ms}ms</td>
+          <td>
+            <button class="btn-action" onclick="copyText('${esc(testCmd)}', this)">📋 Copiar Teste (${p.port === 80 || p.port === 443 || p.port === 8080 || p.port === 8443 || p.port === 3000 || p.port === 8000 ? 'curl' : 'nc'})</button>
+          </td>
+        </tr>`;
+        }).join('')}</tbody>
       </table>
     ` : '<p style="font-size:12px;color:#868e96">Nenhuma porta enterprise aberta detectada (portas web padrão podem estar filtradas pelo CDN).</p>';
 
@@ -324,7 +370,7 @@ export function generateEnterpriseHtml({
         <span class="ftitle">${esc(f.label || f.type)}</span>
       </div>
       <div class="fmeta">${[f.owasp, f.cwe && f.cwe !== '—' ? f.cwe : '', f.confidence ? 'confiança: ' + f.confidence : ''].filter(Boolean).map(esc).join(' · ')}</div>
-      ${f.url ? `<div class="fwhere"><b>📍 Onde:</b> <code>${esc(f.url)}</code></div>` : ''}
+      ${f.url ? `<div class="fwhere"><b>📍 Onde:</b> <a href="${esc(f.url.split(' ')[0])}" target="_blank"><code>${esc(f.url)}</code></a></div>` : ''}
       ${f.cve ? `<div class="fwhere"><b>CVE:</b> ${esc(f.cve)}${f.fixedIn ? ` — corrigido em ${esc(f.fixedIn)}` : ''}</div>` : ''}
       ${ev.length ? `<div class="fevid"><b>🔎 Evidência:</b><ul>${ev.map(e => `<li><code>${esc(e)}</code></li>`).join('')}</ul></div>` : ''}
       ${f.risk ? `<div class="frisk">${esc(f.risk)}</div>` : ''}
@@ -333,8 +379,16 @@ export function generateEnterpriseHtml({
         <div class="verify-title">🧪 Como Verificar Manualmente</div>
         <ol>${mv.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
         ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools:</b> ${esc(mv.devtools)}</p>` : ''}
-        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Teste Focado):</p><span class="cmd">${esc(mv.automated)}</span>` : ''}
-        ${mv.proofOfWork ? `<p style="margin-top:4px;font-weight:600;color:#212529">Comando de Prova Real (Dump Completo):</p><span class="cmd" style="color:#69db7c">${esc(mv.proofOfWork)}</span>` : ''}
+        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Teste Focado):</p>
+        <div class="cmd-wrapper">
+          <span class="cmd">${esc(mv.automated)}</span>
+          <button class="btn-copy" onclick="copyText('${esc(mv.automated)}', this)">📋 Copiar</button>
+        </div>` : ''}
+        ${mv.proofOfWork ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Prova Real (Dump Completo):</p>
+        <div class="cmd-wrapper">
+          <span class="cmd cmd-pow">${esc(mv.proofOfWork)}</span>
+          <button class="btn-copy" onclick="copyText('${esc(mv.proofOfWork)}', this)">📋 Copiar</button>
+        </div>` : ''}
       </div>` : ''}
     </div>`;
   };
@@ -355,11 +409,23 @@ export function generateEnterpriseHtml({
   const tpRows = Object.entries(tpGroups).sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `<tr><td>${esc(k)}</td><td style="text-align:center">${n}</td></tr>`).join('');
 
-  // ── Rotas ──
+  // ── Rotas com Links Clicáveis e Copiador cURL ──
+  const originBase = meta.target ? new URL(meta.target).origin : 'https://10.4.0.20:8443';
   const fpRoutes = (routes || []).filter(r => !r.thirdParty);
-  const routeRows = fpRoutes.slice(0, 120).map(r =>
-    `<tr><td>${esc(r.method)}</td><td><code>${esc(r.path + (r.query ? '?' + r.query : ''))}</code></td><td>${esc(r.kind)}</td><td>${esc(r.phase)}</td><td style="text-align:center">${r.hasAuth ? '🔑' : ''}</td></tr>`).join('');
-  const pagesHtml = (pagesVisited || []).map(u => `<li><code>${esc(u)}</code></li>`).join('');
+  const routeRows = fpRoutes.slice(0, 150).map(r => {
+    const fullUrl = r.path.startsWith('http') ? r.path : `${originBase}${r.path}${r.query ? '?' + r.query : ''}`;
+    const curlCmd = `curl -skD - -X ${r.method} "${fullUrl}" -o /dev/null`;
+    return `<tr>
+      <td><strong>${esc(r.method)}</strong></td>
+      <td><a href="${esc(fullUrl)}" target="_blank"><code>${esc(r.path + (r.query ? '?' + r.query : ''))}</code></a></td>
+      <td>${esc(r.kind)}</td>
+      <td>${esc(r.phase)}</td>
+      <td style="text-align:center">${r.hasAuth ? '🔑' : ''}</td>
+      <td><button class="btn-action" onclick="copyText('${esc(curlCmd)}', this)">📋 cURL</button></td>
+    </tr>`;
+  }).join('');
+
+  const pagesHtml = (pagesVisited || []).map(u => `<li><a href="${esc(u)}" target="_blank"><code>${esc(u)}</code></a></li>`).join('');
 
   // ── Screenshots ──
   const screenshotsHtml = (screenshots && screenshots.length > 0) ? `
@@ -368,7 +434,7 @@ export function generateEnterpriseHtml({
     <div class="screenshots">
       ${screenshots.map(ss => `<div class="screenshot">
         <img src="data:image/png;base64,${ss.base64}" alt="${esc(ss.url)}" loading="lazy" />
-        <div class="ss-label">${esc(ss.url)}</div>
+        <div class="ss-label"><a href="${esc(ss.url)}" target="_blank">${esc(ss.url)}</a></div>
       </div>`).join('')}
     </div>
   </div>` : '';
@@ -379,29 +445,41 @@ export function generateEnterpriseHtml({
     <h2>📜 Timeline da Auditoria</h2>
     <div class="timeline">
       ${timeline.map(t => `<div class="tl-item ${t.type === 'warn' ? 'tl-warn' : t.type === 'error' ? 'tl-error' : ''}">
-        <span class="tl-time">${esc(t.time)}</span>
-        <span class="tl-text"> ${esc(t.text)}</span>
+        <span class="tl-time">[${esc(t.time)}]</span>
+        <span class="tl-text">${esc(t.text)}</span>
       </div>`).join('')}
     </div>
   </div>` : '';
 
-  // ── Testes Gerados ──
+  // ── Testes Gerados com Botões de Cópia ──
   const testsHtml = testArtifacts ? `
   <div class="section">
     <h2>🧪 Testes de Verificação Gerados</h2>
     <p style="font-size:13px;color:#868e96;margin-bottom:12px">Execute estes testes para confirmar que as correções foram aplicadas corretamente.</p>
     
     <h3>Playwright (.spec.ts)</h3>
-    <div class="code-block">${esc(testArtifacts.playwright)}</div>
+    <div class="code-block-wrapper">
+      <div class="code-block">${esc(testArtifacts.playwright)}</div>
+      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.playwright).replace(/`/g, '\\`')}\`, this)">📋 Copiar Playwright</button>
+    </div>
     
     <h3>cURL</h3>
-    <div class="code-block">${esc(testArtifacts.code_snippets?.curl || '')}</div>
+    <div class="code-block-wrapper">
+      <div class="code-block">${esc(testArtifacts.code_snippets?.curl || '')}</div>
+      <button class="btn-copy" onclick="copyText('${esc(testArtifacts.code_snippets?.curl || '')}', this)">📋 Copiar cURL</button>
+    </div>
     
     <h3>Correção Nginx</h3>
-    <div class="code-block">${esc(testArtifacts.server_fix?.nginx || '')}</div>
+    <div class="code-block-wrapper">
+      <div class="code-block">${esc(testArtifacts.server_fix?.nginx || '')}</div>
+      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.server_fix?.nginx || '').replace(/`/g, '\\`')}\`, this)">📋 Copiar Config Nginx</button>
+    </div>
     
     <h3>Correção Apache</h3>
-    <div class="code-block">${esc(testArtifacts.server_fix?.apache || '')}</div>
+    <div class="code-block-wrapper">
+      <div class="code-block">${esc(testArtifacts.server_fix?.apache || '')}</div>
+      <button class="btn-copy" onclick="copyText(\`${esc(testArtifacts.server_fix?.apache || '').replace(/`/g, '\\`')}\`, this)">📋 Copiar Config Apache</button>
+    </div>
   </div>` : '';
 
   // ── Regressão ──
@@ -429,13 +507,13 @@ export function generateEnterpriseHtml({
     <h2>📎 Apêndice</h2>
     
     <h3>Metodologia</h3>
-    <p style="font-size:13px">O Sentinela é um auditor de segurança web guiado por humano. Abre um navegador real (Microsoft Edge InPrivate), você faz login e navega normalmente. Em paralelo, ele:</p>
+    <p style="font-size:13px">O Sentinela é um auditor de segurança web guiado por humano. Abre um navegador real (Microsoft Edge InPrivate), você faz login e navegue normalmente. Em paralelo, ele:</p>
     <ul style="font-size:13px;padding-left:20px;margin:8px 0">
       <li><strong>Coleta passiva:</strong> Headers, cookies, storage, código-fonte, certificado TLS, bibliotecas vulneráveis</li>
       <li><strong>Recon autônomo:</strong> robots.txt, sitemap.xml, Swagger/OpenAPI, GraphQL, CORS, erro verboso</li>
       <li><strong>Monitoramento de rede:</strong> Requisições/respostas, mixed content, tokens na URL</li>
       <li><strong>Análise de login:</strong> CSRF, credenciais em HTTP, session fixation, diff before/after</li>
-      <li><strong>Infraestrutura:</strong> Port scan, timing de socket, GeoIP, reputação IP</li>
+      <li><strong>Infraestrutura:</strong> Port scan, timing de socket, GeoIP, reputação IP, registros DNS (SPF/DMARC/CAA)</li>
       ${infraData ? '<li><strong>Testes ativos (opt-in):</strong> IDOR, open redirect, arquivos sensíveis, métodos HTTP</li>' : ''}
     </ul>
     <p style="font-size:13px">Todos os achados são mapeados para <strong>OWASP Top 10 (2021)</strong> e <strong>CWE</strong>.</p>
@@ -464,6 +542,45 @@ export function generateEnterpriseHtml({
     </ul>
   </div>`;
 
+  // ── JavaScript Interativo de Cópia ──
+  const jsScript = `<script>
+    function copyText(text, btnElement) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => showSuccess(btnElement)).catch(() => fallbackCopy(text, btnElement));
+      } else {
+        fallbackCopy(text, btnElement);
+      }
+    }
+
+    function fallbackCopy(text, btnElement) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        showSuccess(btnElement);
+      } catch (err) {
+        console.error('Falha ao copiar:', err);
+      }
+      document.body.removeChild(textArea);
+    }
+
+    function showSuccess(btn) {
+      if (!btn) return;
+      const originalText = btn.innerHTML;
+      btn.classList.add('copied');
+      btn.innerHTML = '✓ Copiado!';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = originalText;
+      }, 2000);
+    }
+  </script>`;
+
   // ── Montagem Final ──
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -474,7 +591,7 @@ ${css}
   <div class="cover">
     <div>
       <h1>🛡️ Sentinela — Relatório de Auditoria de Segurança</h1>
-      <div class="target">${esc(meta.target)}</div>
+      <div class="target"><a href="${esc(meta.target)}" target="_blank">${esc(meta.target)}</a></div>
       <div class="info">${new Date(meta.timestamp).toLocaleString('pt-BR')} · ${meta.pagesAudited} página(s) auditada(s)</div>
     </div>
     <div class="grade-badge">
@@ -506,9 +623,9 @@ ${css}
 
   ${(routes || []).length ? `<div class="section">
     <h2>🗺️ Rotas e Endpoints</h2>
-    <p style="font-size:13px;color:#868e96">${(routes || []).length} requisições distintas observadas (${fpRoutes.length} do seu domínio).</p>
+    <p style="font-size:13px;color:#868e96">${(routes || []).length} requisições distintas observadas (${fpRoutes.length} do seu domínio). Clique na rota para abrir no navegador ou use o botão para copiar o comando cURL.</p>
     ${pagesHtml ? `<p style="font-size:13px;margin:8px 0"><b>Páginas visitadas:</b></p><ul class="routes" style="margin-bottom:12px">${pagesHtml}</ul>` : ''}
-    ${routeRows ? `<table class="routes"><thead><tr><th>Método</th><th>Rota</th><th>Tipo</th><th>Fase</th><th>Auth</th></tr></thead><tbody>${routeRows}</tbody></table>` : ''}
+    ${routeRows ? `<table class="routes"><thead><tr><th>Método</th><th>Rota</th><th>Tipo</th><th>Fase</th><th>Auth</th><th>Ação</th></tr></thead><tbody>${routeRows}</tbody></table>` : ''}
   </div>` : ''}
 
   ${tpRows ? `<div class="section">
@@ -523,9 +640,9 @@ ${css}
   ${appendixHtml}
 
   <footer>
-    Gerado por <strong>Sentinela v2.0</strong> — Vulnerability Collector &amp; Security Auditor<br>
+    Gerado por <strong>Sentinela v2.2.2</strong> — Vulnerability Collector &amp; Security Auditor<br>
     <span style="font-size:10px">Este relatório é confidencial. Distribuir apenas para pessoas autorizadas.</span>
   </footer>
 
-</div></body></html>`;
+</div>${jsScript}</body></html>`;
 }
