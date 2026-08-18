@@ -8,6 +8,29 @@
  *  4. Ferramenta Online / Alternativa: Segunda opinião externa.
  */
 
+/**
+ * Cookies capturados nas fases LOGIN/PÓS-LOGIN foram criados pelo servidor
+ * numa resposta específica (o callback OIDC, o POST de autenticação) — o
+ * header Set-Cookie SÓ aparece NAQUELE momento. Repetir curl numa página
+ * comum depois NUNCA reproduz o Set-Cookie, ainda que o problema seja real —
+ * um usuário testando manualmente (como aconteceu de verdade nesta sessão)
+ * vê saída vazia e acha que é falso positivo, quando é só limitação do teste.
+ * Esta função gera a ressalva certa e mostra a evidência JÁ CAPTURADA ao vivo
+ * (Playwright leu o cookie do navegador de verdade — não precisa reproduzir
+ * nada pra confiar nisso).
+ */
+function cookieCaptureContext(f) {
+  const lines = [];
+  if (f.flags) {
+    const { httpOnly, secure, sameSite, expires } = f.flags;
+    lines.push(`Capturado AO VIVO no navegador durante a auditoria: httpOnly=${httpOnly}, secure=${secure}, sameSite=${sameSite || '(não definido)'}, expira=${expires || '?'}. Essa é a evidência — não precisa reproduzir nada pra confiar nela.`);
+  }
+  if (f.phase === 'LOGIN' || f.phase === 'PÓS-LOGIN') {
+    lines.push(`ATENÇÃO com o teste via curl abaixo: Set-Cookie só é enviado pelo servidor no instante em que o cookie é CRIADO (aqui, durante o fluxo de login/callback) — repetir a requisição numa página comum depois NUNCA mostra esse Set-Cookie de novo, mesmo com o problema presente. Saída vazia aqui NÃO significa corrigido; é limitação física do teste. Use o DevTools/Console abaixo, que leem o cookie já salvo no navegador autenticado.`);
+  }
+  return lines;
+}
+
 function sanitizeUrl(rawUrl, fallbackUrl = '') {
   const target = rawUrl || fallbackUrl || 'https://10.4.0.20:8443';
   // Se contiver anotação entre parênteses (ex: "https://site.com/page (inline script #1)"), extrair a URL limpa
@@ -95,8 +118,9 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Cookie "${f.cookieName}"`,
       steps: [
-        `1. Teste focado (HTTP): Filtrar o header Set-Cookie específico no terminal.`,
-        `2. PROVA REAL (Navegador): Abrir F12 → Application → Cookies e inspecionar visualmente as colunas HttpOnly, Secure e SameSite.`,
+        ...cookieCaptureContext(f),
+        `1. Teste focado (HTTP): Filtrar o header Set-Cookie específico no terminal (só funciona se você repetir a AÇÃO que cria o cookie, não uma página qualquer).`,
+        `2. PROVA REAL (Navegador): Abrir F12 → Application → Cookies e inspecionar visualmente as colunas HttpOnly, Secure e SameSite — funciona a qualquer momento, é a fonte confiável.`,
       ],
       devtools: `F12 → Application → Storage → Cookies → ${f.domain || 'domínio'} → linha "${f.cookieName}".`,
       automated: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
@@ -109,7 +133,8 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para HttpOnly no Cookie "${f.cookieName}"`,
       steps: [
-        `1. Teste via Console: Abrir F12 → Console e cole o snippet fornecido.`,
+        ...cookieCaptureContext(f),
+        `1. Teste via Console: Abrir F12 → Console (na aba já logada) e cole o snippet fornecido — funciona a qualquer momento, não depende de repetir o login.`,
         `2. PROVA REAL: Se o cookie "${f.cookieName}" for retornado, ele NÃO TEM a proteção HttpOnly (vazio se seguro).`,
       ],
       devtools: `F12 → Application → Cookies → "${f.cookieName}" → coluna HttpOnly.`,
@@ -124,6 +149,7 @@ const VERIFICATION_MAP = {
     return {
       title: `Validação & Prova Real para Prefixo de Cookie em "${f.cookieName}"`,
       steps: [
+        ...cookieCaptureContext(f),
         `1. Teste focado: ver o Set-Cookie do cookie e confirmar que o NOME não começa com __Host- ou __Secure-.`,
         `2. PROVA REAL: dump completo dos cookies — o browser REJEITA sozinho qualquer __Host-/__Secure- malformado, então a mera presença do prefixo já seria a prova de conformidade; a ausência é o que este achado sinaliza (hardening recomendado, não falha confirmada).`,
       ],
@@ -517,6 +543,7 @@ const VERIFICATION_MAP = {
       steps: [
         `1. Teste focado: Capturar o valor do cookie "${f.cookieName}" ANTES de logar (execute o comando 1x), fazer login, e capturar de novo (execute 1x mais).`,
         `2. PROVA REAL: Se o comando 1 e o comando 2 imprimirem o MESMO valor de "${f.cookieName}", a fixação é REAL E CONFIRMADA. O comando de dump completo (sem filtro) confirma que a conexão/resposta está OK caso o filtro volte vazio.`,
+        `   → Se o comando 2 (depois de logado) voltar vazio, não assuma que corrigiu: Set-Cookie só reaparece se o servidor REGENERAR o cookie no login — é exatamente isso que o achado testa. O jeito confiável de comparar é anotar o valor no DevTools antes e depois, não repetir curl anônimo.`,
       ],
       devtools: `F12 → Application → Cookies → anotar o valor de "${f.cookieName}" antes e depois do login.`,
       automated: `curl -skD - "${url}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,

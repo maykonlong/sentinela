@@ -506,14 +506,28 @@ async function auditLoginPage(page, url) {
         }
 
         // 4. Sem CSRF token
+        // CSRF nem sempre é um <input type=hidden> dentro do <form> — dois
+        // padrões legítimos e comuns escapam dessa checagem:
+        //  (a) Double-submit cookie (Auth.js/NextAuth, Django, Express csurf):
+        //      um cookie tipo "__Host-authjs.csrf-token"/"csrftoken"/"_csrf"
+        //      já é a defesa; o valor comparado no servidor vem de outro lugar
+        //      (endpoint /api/auth/csrf, header customizado), não de um input.
+        //  (b) Keycloak (e outros IdPs OIDC): a action do form carrega
+        //      `session_code=`/`execution=`, que amarra o POST a uma sessão de
+        //      autenticação específica do servidor — funcionalmente equivalente
+        //      a um token CSRF, mesmo sem input hidden.
+        // Sem essas exceções, TODO login Keycloak e TODO app com Auth.js vira
+        // "sem CSRF" — falso positivo confirmado numa auditoria real.
         const csrfInput = form.querySelector('input[name*="csrf"], input[name*="_token"], input[name*="csrfmiddleware"], input[name*="authenticity_token"]');
-        if (!csrfInput && (form.method || 'GET').toUpperCase() === 'POST') {
+        const csrfCookie = /(?:^|;\s*)[^=;]*csrf[^=;]*=/i.test(document.cookie);
+        const csrfInActionUrl = /[?&](session_code|execution|csrf|state)=/i.test(form.action || '');
+        if (!csrfInput && !csrfCookie && !csrfInActionUrl && (form.method || 'GET').toUpperCase() === 'POST') {
           findings.push({
             type: 'login_no_csrf',
             severity: 'MEDIUM',
             phase: 'PRÉ-LOGIN',
             label: 'Login sem CSRF token',
-            risk: 'Formulário de login não tem token CSRF visível. Atacante pode criar página que faz login com credenciais que ele controla (login CSRF), fixando a sessão do atacante no navegador da vítima.',
+            risk: 'Formulário de login não tem token CSRF visível (nem input hidden, nem cookie csrf-*, nem session_code/execution na action). Atacante pode criar página que faz login com credenciais que ele controla (login CSRF), fixando a sessão do atacante no navegador da vítima.',
             recommendation: 'Adicionar token CSRF no formulário de login. Se a app usa SPA com JWT, CSRF pode ser mitigado via SameSite cookies ou custom header.',
           });
         }
@@ -945,16 +959,20 @@ async function collectPageData(page, url) {
           }
         });
 
-        // Form sem CSRF token
+        // Form sem CSRF token — mesmas exceções do login (ver comentário em
+        // auditLoginPage): cookie csrf-* (double-submit) ou session_code/
+        // execution/state na action (padrão OIDC) já são defesa CSRF.
         const csrfInput = form.querySelector('input[name*="csrf"], input[name*="_token"], input[name*="csrfmiddleware"]');
-        if (!csrfInput && form.method.toUpperCase() === 'POST') {
+        const csrfCookie = /(?:^|;\s*)[^=;]*csrf[^=;]*=/i.test(document.cookie);
+        const csrfInActionUrl = /[?&](session_code|execution|csrf|state)=/i.test(form.action || '');
+        if (!csrfInput && !csrfCookie && !csrfInActionUrl && form.method.toUpperCase() === 'POST') {
           findings.push({
             type: 'form_no_csrf',
             severity: 'MEDIUM',
             formIndex: index,
             action: form.action,
             method: 'POST',
-            note: 'Formulário POST sem token CSRF visível. Se o backend não valida CSRF via header ou cookie, está vulnerável a CSRF.',
+            note: 'Formulário POST sem token CSRF visível (nem input hidden, nem cookie csrf-*, nem session_code/execution na action). Se o backend não valida CSRF via header ou cookie, está vulnerável a CSRF.',
           });
         }
       });
