@@ -1905,6 +1905,13 @@ async function main() {
 
   infraData = await infraPromise;
   if (infraData) {
+    // Sem isso, `infra` nunca chegava no findings.ndjson/infra.json da sessão —
+    // só existia na variável em memória deste processo. Relatório gerado ao
+    // vivo (main() usa `infraData` local) mostrava porta aberta normalmente;
+    // relatório gerado depois via `sentinela.mjs report <id>` (lê a sessão do
+    // disco) vinha com infra:null e a seção de portas sumia — sem nenhum erro,
+    // só silenciosamente ausente.
+    if (_sessionHooks?.onInfra) _sessionHooks.onInfra(infraData);
     if (infraData.tcpScan?.findings?.length > 0) {
       const tcpFindings = infraData.tcpScan.findings.map(f => ({ ...f, phase: 'PRÉ-LOGIN' }));
       tcpFindings.forEach(logFinding);

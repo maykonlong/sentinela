@@ -23,7 +23,7 @@
 export function dedupKey(f) {
   const t = f.type;
   if (['missing_security_header', 'weak_security_header', 'information_disclosure_header',
-       'cors_wildcard', 'cors_credentials', 'no_https'].includes(t)) {
+       'cors_wildcard', 'cors_credentials', 'no_https', 'duplicate_security_header'].includes(t)) {
     // Postura por ORIGEM, não por URL: o mesmo header ausente em 27 páginas do
     // mesmo host é UM problema. Mas a origem entra na chave porque o fluxo de
     // login costuma passar por outro host (ex.: Keycloak/IdP) — colapsar os dois
