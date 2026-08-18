@@ -300,7 +300,8 @@ export function generateEnterpriseHtml({
         <div class="verify-title">🧪 Como Verificar Manualmente</div>
         <ol>${mv.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
         ${mv.devtools ? `<p style="margin-top:4px"><b>DevTools:</b> ${esc(mv.devtools)}</p>` : ''}
-        ${mv.automated ? `<span class="cmd">${esc(mv.automated)}</span>` : ''}
+        ${mv.automated ? `<p style="margin-top:6px;font-weight:600;color:#212529">Comando de Validação (Teste Focado):</p><span class="cmd">${esc(mv.automated)}</span>` : ''}
+        ${mv.proofOfWork ? `<p style="margin-top:4px;font-weight:600;color:#212529">Comando de Prova Real (Dump Completo):</p><span class="cmd" style="color:#69db7c">${esc(mv.proofOfWork)}</span>` : ''}
       </div>` : ''}
     </div>`;
   };

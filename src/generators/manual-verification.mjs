@@ -1,18 +1,11 @@
 /**
- * Manual Verification Generator — Instruções "Como Verificar Manualmente"
+ * Manual Verification Generator — Prova Real e Validação Multi-Cenário
  *
- * Para cada tipo de achado, gera instruções passo-a-passo detalhadas de como
- * um profissional/empresa pode confirmar o problema sem depender do Sentinela.
- *
- * Princípios de Resiliência Universal:
- *  1. `curl -skD - "$URL" -o /dev/null` para headers:
- *     - `-k`: ignora erros de SSL/certificados auto-assinados ou IPs
- *     - `-s`: modo silencioso sem barra de progresso
- *     - `-D -`: imprime os Response Headers no stdout
- *     - `-o /dev/null`: descarta o corpo (evita poluição no terminal)
- *     - Usa GET por padrão (evita erros 405 Method Not Allowed do HEAD/curl -I em servidores como Caddy/FastAPI/Express)
- *  2. `curl -sk "$URL"` para inspeção de conteúdo/HTML/código
- *  3. `hostAndPort(f)` preserva a porta real do serviço (ex: :8443, :8080)
+ * Para cada achado, gera um plano de validação completo com PROVA REAL:
+ *  1. Teste Focado: Busca exatamente a vulnerabilidade.
+ *  2. Prova Real (Dump/Baseline): Exibe todos os cabeçalhos/dados para garantir que o resultado não é falso negativo por erro de filtro.
+ *  3. DevTools / GUI: Passo a passo visual no navegador.
+ *  4. Ferramenta Online / Alternativa: Segunda opinião externa.
  */
 
 function hostname(f) {
@@ -42,38 +35,40 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   missing_security_header: (f) => ({
-    title: `Confirmar ausência do header "${f.header}"`,
+    title: `Validação & Prova Real para Header "${f.header}"`,
     steps: [
-      `Abrir o terminal e executar o comando abaixo.`,
-      `Se o header "${f.header}" NÃO aparecer na saída, a ausência está confirmada.`,
-      `Se o header aparecer, ele já foi configurado — problema corrigido.`,
-      `Nota: O comando faz uma requisição GET real enviando os cabeçalhos diretamente para stdout.`,
+      `1. Teste focado: Execute o comando filtrado. Se não retornar nada, o header está ausente.`,
+      `2. PROVA REAL (Dump Completo): Execute o comando sem grep para listar TODOS os cabeçalhos retornados pelo servidor.`,
+      `   → Se o comando 2 trouxer cabeçalhos mas o comando 1 não trouxer "${f.header}", a AUSÊNCIA É REAL E CONFIRMADA.`,
+      `   → Se o comando 2 der erro ou voltar vazio, há um problema de conexão/firewall (não um erro de header).`,
     ],
-    devtools: `F12 → Network → clique na requisição do documento (primeira linha) → aba "Headers" → seção "Response Headers" → procurar "${f.header}".`,
+    devtools: `F12 → Network → selecionar primeira requisição → Headers → Response Headers (verificar lista completa).`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "${f.header}"`,
+    proofOfWork: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null`,
     online: `https://securityheaders.com/?q=${encodeURIComponent(f.url || '')}&followRedirects=on`,
   }),
 
   weak_security_header: (f) => ({
-    title: `Confirmar valor inadequado do header "${f.header}"`,
+    title: `Validação & Prova Real para Header "${f.header}"`,
     steps: [
-      `Executar o comando abaixo para ver o valor atual retornado pelo servidor.`,
-      `Valor atual capturado: "${f.currentValue || '(não informado)'}"`,
-      `Comparar com a configuração recomendada na seção de correção do relatório.`,
+      `1. Teste focado: Buscar o header "${f.header}". Valor atual capturado: "${f.currentValue || 'N/A'}"`,
+      `2. PROVA REAL: Listar todos os cabeçalhos da resposta para inspecionar a diretiva completa.`,
     ],
-    devtools: `F12 → Network → clique no documento → Headers → Response Headers → localizar "${f.header}".`,
+    devtools: `F12 → Network → clique no documento → Response Headers → conferir valor de "${f.header}".`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "${f.header}"`,
+    proofOfWork: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null`,
     online: `https://securityheaders.com/?q=${encodeURIComponent(f.url || '')}`,
   }),
 
   information_disclosure_header: (f) => ({
-    title: `Confirmar exposição de informação no header "${f.header}"`,
+    title: `Validação & Prova Real para Exposição em Header "${f.header}"`,
     steps: [
-      `Executar o comando abaixo e verificar a resposta do servidor.`,
-      `Se o header revelar tecnologia ou versão (ex: "nginx/1.18.0", "PHP/8.1", "Caddy"), está confirmado.`,
+      `1. Teste focado: Buscar assinaturas de servidor e tecnologia.`,
+      `2. PROVA REAL: Listar todos os cabeçalhos para verificar se há vazamentos secundários (X-Powered-By, Server, Via).`,
     ],
-    devtools: `F12 → Network → documento principal → Headers → Response Headers → verificar "${f.header}".`,
+    devtools: `F12 → Network → Response Headers → inspecionar campos de servidor.`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -iE "server|x-powered|x-generator|via|x-aspnet"`,
+    proofOfWork: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -81,26 +76,26 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   cookie_insecure_flags: (f) => ({
-    title: `Confirmar flags inseguras no cookie "${f.cookieName}"`,
+    title: `Validação & Prova Real para Cookie "${f.cookieName}"`,
     steps: [
-      `Abrir o navegador na página autenticada do site.`,
-      `F12 → Application → Cookies → selecionar o domínio na lateral.`,
-      `Localizar o cookie "${f.cookieName}" na tabela.`,
-      `Verificar as colunas: "HttpOnly" (deve estar ✓), "Secure" (deve estar ✓), "SameSite" (deve ser Lax ou Strict).`,
+      `1. Teste focado (HTTP): Filtrar o header Set-Cookie específico no terminal.`,
+      `2. PROVA REAL (Navegador): Abrir F12 → Application → Cookies e inspecionar visualmente as colunas HttpOnly, Secure e SameSite.`,
     ],
     devtools: `F12 → Application → Storage → Cookies → ${f.domain || 'domínio'} → linha "${f.cookieName}".`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "Set-Cookie.*${f.cookieName}"`,
+    proofOfWork: `curl -skD - "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "Set-Cookie"`,
   }),
 
   cookie_sensitive_no_httponly: (f) => ({
-    title: `Confirmar que cookie sensível "${f.cookieName}" está sem HttpOnly`,
+    title: `Validação & Prova Real para HttpOnly no Cookie "${f.cookieName}"`,
     steps: [
-      `F12 → Application → Cookies → localizar "${f.cookieName}".`,
-      `Verificar a coluna "HttpOnly" — se estiver desmarcada, o cookie pode ser lido por JavaScript (vulnerável a roubo via XSS).`,
-      `Testar via Console digitando o comando abaixo.`,
+      `1. Teste via Console: Executar \`document.cookie\` no Console do navegador.`,
+      `   → PROVA REAL: Se o cookie "${f.cookieName}" aparecer na string impressa, ele NÃO TEM HttpOnly (Vulnerável).`,
+      `   → Se não aparecer, o cookie está protegido com HttpOnly.`,
     ],
-    devtools: `F12 → Application → Cookies → "${f.cookieName}" → coluna HttpOnly.`,
+    devtools: `F12 → Console → digitar "document.cookie" → Enter.`,
     automated: `document.cookie.includes("${f.cookieName}")`,
+    proofOfWork: `console.log(document.cookie)`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -108,26 +103,25 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   storage_sensitive_data: (f) => ({
-    title: `Confirmar dado sensível no ${f.storage || 'localStorage'}`,
+    title: `Validação & Prova Real para Dados Sensíveis no ${f.storage || 'localStorage'}`,
     steps: [
-      `Abrir a página autenticada do site.`,
-      `F12 → Application → ${f.storage || 'Local Storage'} → selecionar o domínio.`,
-      `Localizar a chave "${f.key}" na tabela.`,
-      `Verificar se o valor contém email, senha, token, CPF ou outros dados sensíveis.`,
+      `1. Teste focado: Inspecionar o item específico "${f.key}".`,
+      `2. PROVA REAL: Imprimir o armazenamento completo no Console para verificar se há outros dados vazados.`,
     ],
-    devtools: `F12 → Application → ${f.storage || 'Local Storage'} → localizar chave "${f.key}".`,
+    devtools: `F12 → Application → ${f.storage || 'Local Storage'} → inspecionar tabela.`,
     automated: `${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}.getItem("${f.key}")`,
+    proofOfWork: `console.table(Object.entries(${f.storage === 'sessionStorage' ? 'sessionStorage' : 'localStorage'}))`,
   }),
 
   storage_jwt_exposed: (f) => ({
-    title: `Confirmar JWT exposto no ${f.storage || 'localStorage'}`,
+    title: `Validação & Prova Real para JWT no ${f.storage || 'localStorage'}`,
     steps: [
-      `F12 → Application → ${f.storage || 'Local Storage'} → localizar chave "${f.key}".`,
-      `Copiar o valor do token e colar em https://jwt.io para decodificar.`,
-      `Verificar se o payload contém dados sensíveis sem criptografia.`,
+      `1. Teste focado: Ler o token da chave "${f.key}".`,
+      `2. PROVA REAL: Decodificar o payload Base64 do JWT e imprimir as claims diretamente.`,
     ],
-    devtools: `F12 → Application → ${f.storage || 'Local Storage'} → "${f.key}" → decodificar em jwt.io.`,
-    automated: `JSON.stringify(JSON.parse(atob(localStorage.getItem("${f.key}").split('.')[1])))`,
+    devtools: `F12 → Application → ${f.storage || 'Local Storage'} → copiar token e colar em jwt.io.`,
+    automated: `JSON.parse(atob(localStorage.getItem("${f.key}").split('.')[1]))`,
+    proofOfWork: `console.log(JSON.parse(atob(localStorage.getItem("${f.key}").split('.')[1])))`,
     online: `https://jwt.io`,
   }),
 
@@ -136,56 +130,57 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   exposed_key: (f) => ({
-    title: `Confirmar segredo/chave de API exposto no código`,
+    title: `Validação & Prova Real para Segredo no Código`,
     steps: [
-      `Abrir o arquivo: ${f.url || '(URL)'}.`,
-      `F12 → Sources → localizar o arquivo.`,
-      `Usar Ctrl+F para buscar por: ${(f.match || '').substring(0, 30)}`,
-      `Verificar se é uma chave real.`,
+      `1. Teste focado: Baixar o script e buscar o padrão.`,
+      `2. PROVA REAL: Abrir o arquivo no DevTools (Sources) e verificar o contexto da linha.`,
     ],
-    devtools: `F12 → Sources → Ctrl+Shift+F → buscar chave.`,
+    devtools: `F12 → Sources → Ctrl+Shift+F → buscar o trecho da chave.`,
     automated: `curl -sk "${f.url || ''}" | grep -oE "[A-Za-z0-9_\\-]{20,}"`,
+    proofOfWork: `curl -sk "${f.url || ''}" | grep -n -C 3 -oE "[A-Za-z0-9_\\-]{20,}"`,
   }),
 
   dangerous_code: (f) => ({
-    title: `Confirmar uso de "${f.match || 'código perigoso'}" sem sanitização`,
+    title: `Validação & Prova Real para "${f.match || 'innerHTML'}"`,
     steps: [
-      `Abrir o arquivo: ${f.url || '?'}`,
-      `F12 → Sources → Ctrl+F → buscar "${f.match || 'innerHTML'}"`,
-      `Verificar se a variável atribuída vem de entrada do usuário ou API externa sem sanitização.`,
+      `1. Teste focado: Localizar o uso de ${f.match || 'innerHTML'} no arquivo ${f.url || 'JS'}.`,
+      `2. PROVA REAL: Exibir as linhas com contexto (-C 3) para validar a falta de sanitização antes da atribuição.`,
     ],
-    devtools: `F12 → Sources → Ctrl+Shift+F → buscar "${f.match || 'innerHTML'}"`,
+    devtools: `F12 → Sources → Ctrl+Shift+F → buscar "${f.match || 'innerHTML'}".`,
     automated: `curl -sk "${f.url || ''}" | grep -n "${f.match || 'innerHTML'}"`,
+    proofOfWork: `curl -sk "${f.url || ''}" | grep -n -C 3 "${f.match || 'innerHTML'}"`,
   }),
 
   missing_sri: (f) => ({
-    title: `Confirmar ausência de SRI no script externo`,
+    title: `Validação & Prova Real para SRI`,
     steps: [
-      `Abrir o código-fonte da página: Ctrl+U (ou F12 → Elements).`,
-      `Buscar pela tag: <script src="${f.src || f.url || '?'}">`,
-      `Verificar se possui o atributo integrity="sha256-..."`,
+      `1. Teste focado: Buscar a tag script no HTML.`,
+      `2. PROVA REAL: Imprimir todas as tags script externas e verificar quais possuem o atributo \`integrity\`.`,
     ],
-    devtools: `F12 → Elements → Ctrl+F → buscar "${(f.src || '').substring(0, 30)}"`,
+    devtools: `F12 → Elements → Ctrl+F → buscar o arquivo script.`,
+    automated: `curl -sk "${f.url || ''}" | grep -i "${f.src || 'script'}"`,
+    proofOfWork: `curl -sk "${f.url || ''}" | grep -iE "<script"`,
     online: `https://www.srihash.org/`,
   }),
 
   global_variable_sensitive: (f) => ({
-    title: `Confirmar dado sensível em variável global JS`,
+    title: `Validação & Prova Real para Variável Global`,
     steps: [
-      `F12 → Console → digitar o nome da variável e pressionar Enter.`,
-      `Se retornar dados sensíveis, está confirmado.`,
+      `1. Teste focado: Imprimir o valor de "${f.variable || 'window'}".`,
+      `2. PROVA REAL: Inspecionar no Console todas as propriedades de \`window\` ou estado global.`,
     ],
-    devtools: `F12 → Console → digitar: ${f.variable || 'window.userData'}`,
-    automated: `${f.variable || 'JSON.stringify(window.__state)'}`,
+    devtools: `F12 → Console → digitar o nome da variável.`,
+    automated: `${f.variable || 'window'}`,
+    proofOfWork: `console.dir(${f.variable || 'window'})`,
   }),
 
   frontend_role_definition: (f) => ({
-    title: `Confirmar definição de roles/permissões no frontend`,
+    title: `Validação & Prova Real para Controle de Acesso no Frontend`,
     steps: [
-      `F12 → Sources → Ctrl+Shift+F → buscar por "admin", "role", "permission".`,
-      `Verificar se o controle de acesso é baseado apenas no cliente.`,
+      `1. Teste focado: Modificar o papel localmente.`,
+      `2. PROVA REAL: Tentar efetuar uma ação privilegiada e verificar se o backend bloqueia com HTTP 401/403.`,
     ],
-    devtools: `F12 → Console → testar alteração de permissão local.`,
+    devtools: `F12 → Console → alterar role → acionar botão administrativo.`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -193,45 +188,49 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   weak_tls: (f) => ({
-    title: `Confirmar protocolo TLS inseguro`,
+    title: `Validação & Prova Real para Protocolo TLS`,
     steps: [
-      `Clicar no cadeado no navegador → "Connection is secure" → "Certificate".`,
-      `Ou executar o comando abaixo apontando para o servidor e porta real.`,
+      `1. Teste focado: Forçar handshake TLS 1.0.`,
+      `2. PROVA REAL: Conectar e exibir todos os ciphers suportados pelo servidor.`,
     ],
-    devtools: `F12 → Security → verificar versão TLS.`,
+    devtools: `F12 → Security → aba Connection.`,
     automated: `curl -v --tlsv1.0 --tls-max 1.0 "${f.url || 'https://SEU-SITE.com'}" 2>&1 | grep "SSL connection"`,
+    proofOfWork: `echo | openssl s_client -connect ${hostAndPort(f)} -tls1 2>&1`,
     online: `https://www.ssllabs.com/ssltest/analyze.html?d=${hostname(f)}`,
   }),
 
   cert_expired: (f) => ({
-    title: `Confirmar certificado TLS expirado`,
+    title: `Validação & Prova Real para Certificado Expirado`,
     steps: [
-      `Clicar no cadeado na barra do navegador ➔ "Certificate" ➔ "Valid until".`,
-      `Ou executar o comando abaixo conectando na porta real do serviço (${hostAndPort(f)}).`,
+      `1. Teste focado: Verificar data de expiração na porta real (${hostAndPort(f)}).`,
+      `2. PROVA REAL: Dump completo dos detalhes e emissor do certificado x509.`,
     ],
-    devtools: `F12 → Security → "View certificate".`,
+    devtools: `F12 → Security → View certificate.`,
     automated: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -enddate -noout`,
+    proofOfWork: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -text -noout | grep -E "Not Before|Not After|Issuer|Subject"`,
     online: `https://www.sslshopper.com/ssl-checker.html#hostname=${hostname(f)}`,
   }),
 
   cert_expiring: (f) => ({
-    title: `Confirmar que o certificado TLS vence em breve`,
+    title: `Validação & Prova Real para Vencimento de Certificado`,
     steps: [
-      `Clicar no cadeado ➔ "Certificate" ➔ verificar a data "Valid until".`,
-      `Ou executar o comando abaixo conectando na porta real do serviço (${hostAndPort(f)}).`,
+      `1. Teste focado: Consultar notAfter na porta real (${hostAndPort(f)}).`,
+      `2. PROVA REAL: Exibir o período completo de validade (Not Before e Not After).`,
     ],
-    devtools: `F12 → Security → "View certificate".`,
+    devtools: `F12 → Security → View certificate.`,
     automated: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -enddate -noout`,
+    proofOfWork: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -dates -noout`,
   }),
 
   no_https: (f) => ({
-    title: `Confirmar se o site redireciona para HTTPS`,
+    title: `Validação & Prova Real para Redirecionamento HTTPS`,
     steps: [
-      `Acessar a versão HTTP do site: http://${hostname(f)}`,
-      `Verificar se ocorre o redirecionamento automático (301/302) para HTTPS.`,
+      `1. Teste focado: Verificar header Location na requisição HTTP.`,
+      `2. PROVA REAL: Fazer requisição completa seguindo redirects (-L) e observar a cadeia de status codes.`,
     ],
-    devtools: `F12 → Network → acessar http://${hostname(f)} → verificar status 301/302.`,
+    devtools: `F12 → Network → acessar HTTP → verificar status 301/302.`,
     automated: `curl -skD - "http://${hostname(f)}" -o /dev/null | grep -iE "location|strict"`,
+    proofOfWork: `curl -skD - -L "http://${hostname(f)}" -o /dev/null`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -241,14 +240,14 @@ const VERIFICATION_MAP = {
   exposed_port: (f) => {
     const host = f.host || hostname(f);
     return {
-      title: `Confirmar porta ${f.port} (${f.service}) aberta`,
+      title: `Validação & Prova Real para Porta ${f.port} (${f.service})`,
       steps: [
-        `Executar o comando de verificação de porta via terminal.`,
-        `Se retornar "succeeded" ou conectar, a porta está exposta — confirmado.`,
-        `Se der "Connection refused" ou timeout, a porta está fechada/filtrada.`,
+        `1. Teste focado: Tentar handshake TCP com netcat/nc.`,
+        `2. PROVA REAL: Teste de banner grab / resposta de protocolo. Se conectar e responder banner, a exposição é 100% CONFIRMADA.`,
       ],
-      devtools: `Não aplicável — verificação via terminal ou netcat/nmap.`,
+      devtools: `Terminal / CLI.`,
       automated: `nc -zv ${host} ${f.port} 2>&1`,
+      proofOfWork: `nc -vv -w 3 ${host} ${f.port} 2>&1`,
       online: `https://www.yougetsignal.com/tools/open-ports/ (inserir IP ${host} e porta ${f.port})`,
     };
   },
@@ -258,23 +257,25 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   cors_wildcard: (f) => ({
-    title: `Confirmar CORS com wildcard (*)`,
+    title: `Validação & Prova Real para CORS Wildcard`,
     steps: [
-      `Executar o comando abaixo enviando um cabeçalho Origin malicioso.`,
-      `Verificar se a resposta contém Access-Control-Allow-Origin: *.`,
+      `1. Teste focado: Enviar Origin "https://evil.com".`,
+      `2. PROVA REAL: Enviar preflight OPTIONS request e verificar se autoriza métodos e origens arbitrárias.`,
     ],
-    devtools: `F12 → Network → requisição da API → Response Headers → verificar CORS.`,
+    devtools: `F12 → Console → testar fetch cross-origin.`,
     automated: `curl -skD - -H "Origin: https://evil.com" "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "access-control"`,
+    proofOfWork: `curl -skD - -X OPTIONS -H "Origin: https://evil.com" -H "Access-Control-Request-Method: POST" "${f.url || 'https://SEU-SITE.com'}" -o /dev/null`,
   }),
 
   cors_credentials: (f) => ({
-    title: `Confirmar CORS com credentials e wildcard`,
+    title: `Validação & Prova Real para CORS Credentials`,
     steps: [
-      `Executar o comando enviando Origin customizado.`,
-      `Verificar se o servidor retorna Access-Control-Allow-Credentials: true.`,
+      `1. Teste focado: Checar se ACAO reflete a Origin e ACAC é true.`,
+      `2. PROVA REAL: Dump completo dos cabeçalhos Access-Control-*.`,
     ],
-    devtools: `F12 → Network → Response Headers → verificar Access-Control-Allow-Credentials.`,
+    devtools: `F12 → Network → Response Headers.`,
     automated: `curl -skD - -H "Origin: https://evil.com" "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "access-control"`,
+    proofOfWork: `curl -skD - -H "Origin: https://evil.com" "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -iE "access-control-allow-origin|access-control-allow-credentials"`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -282,40 +283,47 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   swagger_exposed: (f) => ({
-    title: `Confirmar que o Swagger/OpenAPI está público`,
+    title: `Validação & Prova Real para OpenAPI/Swagger Público`,
     steps: [
-      `Acessar a URL em modo anônimo (InPrivate/Incognito).`,
-      `Se abrir sem pedir autenticação, está confirmado.`,
+      `1. Teste focado: Verificar status HTTP 200 do JSON de documentação.`,
+      `2. PROVA REAL: Baixar o arquivo JSON e validar se contém a chave "paths" com os endpoints expostos.`,
     ],
-    devtools: `Navegador em aba InPrivate → acessar: ${f.url || '/openapi.json'}`,
+    devtools: `Janela InPrivate → acessar a URL sem login.`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com/openapi.json'}" -o /dev/null | head -n 5`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/openapi.json'}" | grep -o '"paths":{[^}]*' | head -c 200`,
   }),
 
   graphql_exposed: (f) => ({
-    title: `Confirmar que o endpoint GraphQL está público`,
+    title: `Validação & Prova Real para GraphQL Introspection`,
     steps: [
-      `Executar o teste de Introspection GraphQL abaixo.`,
+      `1. Teste focado: Executar query de __schema.`,
+      `2. PROVA REAL: Imprimir o catálogo de tipos retornado pela API.`,
     ],
-    devtools: `F12 → Console → testar consulta introspection.`,
+    devtools: `F12 → Console → testar query GraphQL.`,
     automated: `curl -sk -X POST -H "Content-Type: application/json" -d '{"query":"{__schema{types{name}}}"}' "${f.url || 'https://SEU-SITE.com/graphql'}"`,
+    proofOfWork: `curl -sk -X POST -H "Content-Type: application/json" -d '{"query":"{__schema{queryType{name}mutationType{name}}}"}' "${f.url || 'https://SEU-SITE.com/graphql'}"`,
   }),
 
   robots_sensitive_paths: (f) => ({
-    title: `Confirmar paths sensíveis expostos no robots.txt`,
+    title: `Validação & Prova Real para robots.txt`,
     steps: [
-      `Acessar a URL do robots.txt.`,
+      `1. Teste focado: Baixar robots.txt.`,
+      `2. PROVA REAL: Exibir todas as linhas "Disallow:" e testar o acesso HTTP em cada uma delas.`,
     ],
-    devtools: `Acessar ${f.url || 'https://SEU-SITE.com/robots.txt'} no navegador.`,
+    devtools: `Acessar robots.txt no navegador.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com/robots.txt'}"`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/robots.txt'}" | grep -i "Disallow:"`,
   }),
 
   error_verbose: (f) => ({
-    title: `Confirmar que erros expõem informações internas`,
+    title: `Validação & Prova Real para Erro Verboso`,
     steps: [
-      `Causar um erro intencional acessando uma URL inexistente.`,
+      `1. Teste focado: Requisitar rota inexistente.`,
+      `2. PROVA REAL: Exibir o corpo da resposta e buscar por assinaturas de stack trace (at / Exception / Traceback / Line).`,
     ],
-    devtools: `F12 → Network → requisição com erro → Response.`,
+    devtools: `F12 → Network → Response do erro.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com/pagina-inexistente-12345'}"`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/pagina-inexistente-12345'}" | grep -iE "exception|stacktrace|traceback|line [0-9]+"`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -323,12 +331,14 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   ip_blacklisted: (f) => ({
-    title: `Confirmar que o IP está em blacklists`,
+    title: `Validação & Prova Real para Blacklist IP`,
     steps: [
-      `Acessar o MXToolbox para checar o IP: ${f.ip || '?'}`,
+      `1. Teste focado: Consulta DNSBL.`,
+      `2. PROVA REAL: Consultar os principais provedores de blacklist (Spamhaus, Sorbs, Barracuda) individualmente.`,
     ],
-    devtools: `Não aplicável — verificação via ferramenta online.`,
+    devtools: `Consulta via CLI/MXToolbox.`,
     automated: `host ${f.ip ? f.ip.split('.').reverse().join('.') : '?'}.zen.spamhaus.org`,
+    proofOfWork: `nslookup ${f.ip ? f.ip.split('.').reverse().join('.') : '?'}.bl.spamcop.net`,
     online: `https://mxtoolbox.com/blacklists.aspx?q=${f.ip || ''}`,
   }),
 
@@ -337,38 +347,45 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   login_no_csrf: (f) => ({
-    title: `Confirmar ausência de CSRF token no formulário de login`,
+    title: `Validação & Prova Real para CSRF no Login`,
     steps: [
-      `Abrir o formulário de login e inspecionar o código HTML.`,
+      `1. Teste focado: Buscar tags <input> ocultas no formulário.`,
+      `2. PROVA REAL: Inspecionar o HTML completo da tag <form> até seu fechamento </form>.`,
     ],
-    devtools: `F12 → Elements → buscar por "csrf" ou "_token" na tag <form>.`,
+    devtools: `F12 → Elements → buscar <form>.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -iE "csrf|_token|nonce"`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -n -C 5 -i "<form"`,
   }),
 
   login_form_get: (f) => ({
-    title: `Confirmar que o formulário de login usa GET (inseguro)`,
+    title: `Validação & Prova Real para Login via GET`,
     steps: [
-      `Verificar o atributo method da tag <form>.`,
+      `1. Teste focado: Inspecionar o atributo method.`,
+      `2. PROVA REAL: Imprimir a tag <form> da página de login.`,
     ],
-    devtools: `F12 → Elements → buscar "<form" → verificar método.`,
+    devtools: `F12 → Elements → inspecionar <form>.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -i "<form"`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -oE '<form[^>]*>'`,
   }),
 
   login_credentials_http: (f) => ({
-    title: `Confirmar envio de credenciais por HTTP`,
+    title: `Validação & Prova Real para Credenciais em HTTP`,
     steps: [
-      `F12 → Network → verificar ação de envio do login.`,
+      `1. Teste focado: Inspecionar action do formulário.`,
+      `2. PROVA REAL: Exibir o atributo action exato retornado no HTML.`,
     ],
-    devtools: `F12 → Network → verificar URL do POST.`,
+    devtools: `F12 → Elements → verificar action no form.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -i "action"`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/login'}" | grep -oE 'action="[^"]*"'`,
   }),
 
   session_fixation: (f) => ({
-    title: `Confirmar session fixation`,
+    title: `Validação & Prova Real para Session Fixation`,
     steps: [
-      `Comparar o valor do cookie de sessão antes e depois do login.`,
+      `1. Teste focado: Comparar o cookie antes e depois de logar.`,
+      `2. PROVA REAL: Enviar o cookie anônimo no cabeçalho Cookie: e verificar se a sessão autenticada é mantida sob o mesmo identificador.`,
     ],
-    devtools: `F12 → Application → Cookies → comparar valor do cookie antes/depois do login.`,
+    devtools: `F12 → Application → Cookies (anotar antes e depois).`,
     automated: `Comparar cookies de sessão antes e depois do login.`,
   }),
 
@@ -377,11 +394,12 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   form_no_csrf: (f) => ({
-    title: `Confirmar ausência de CSRF token no formulário`,
+    title: `Validação & Prova Real para CSRF em Formulário`,
     steps: [
-      `Inspecionar o formulário e verificar os campos ocultos.`,
+      `1. Teste focado: Buscar tokens ocultos no formulário.`,
+      `2. PROVA REAL: Tentar submeter o formulário via POST sem enviar token/cookie CSRF e verificar se o servidor aceita a ação (HTTP 200/302).`,
     ],
-    devtools: `F12 → Elements → Ctrl+F → buscar "csrf" ou "_token".`,
+    devtools: `F12 → Elements → inspecionar o formulário.`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com'}" | grep -iE "csrf|_token|nonce"`,
   }),
 
@@ -390,67 +408,79 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   mixed_content: (f) => ({
-    title: `Confirmar Mixed Content`,
+    title: `Validação & Prova Real para Mixed Content`,
     steps: [
-      `Verificar avisos de Mixed Content no console do navegador.`,
+      `1. Teste focado: Buscar tags com src/href usando http:// em página HTTPS.`,
+      `2. PROVA REAL: Listar todas as URLs de recursos externos e filtrar apenas as que usam o esquema http://.`,
     ],
-    devtools: `F12 → Console → filtrar por "Mixed Content".`,
+    devtools: `F12 → Console → filtro "Mixed Content".`,
     automated: `curl -sk "${f.url || 'https://SEU-SITE.com'}" | grep -oE 'src="http://[^"]+"|href="http://[^"]+"'`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com'}" | grep -n -E 'http://'`,
   }),
 
   login_token_in_url: (f) => ({
-    title: `Confirmar token/código sensível na URL`,
+    title: `Validação & Prova Real para Token na URL`,
     steps: [
-      `Verificar parâmetros da URL durante ou após o login.`,
+      `1. Teste focado: Buscar query string com parâmetros sensíveis.`,
+      `2. PROVA REAL: Inspecionar os cabeçalhos de redirecionamento (Location/Referer).`,
     ],
-    devtools: `F12 → Network → verificar parâmetros da URL.`,
+    devtools: `F12 → Network → verificar URL do GET pós-login.`,
     automated: `curl -skD - "${f.url || ''}" -o /dev/null | grep -iE "location|referer"`,
   }),
 
   missing_security_txt: (f) => ({
-    title: `Confirmar ausência do security.txt`,
+    title: `Validação & Prova Real para security.txt`,
     steps: [
-      `Acessar a URL /.well-known/security.txt no navegador.`,
+      `1. Teste focado: Requisitar /.well-known/security.txt.`,
+      `2. PROVA REAL: Verificar se o status é 404/403 e se a resposta não contém as chaves "Contact:" ou "Expires:".`,
     ],
-    devtools: `Abrir: ${f.url ? new URL(f.url).origin : 'https://SEU-SITE.com'}/.well-known/security.txt`,
+    devtools: `Navegar até /.well-known/security.txt`,
     automated: `curl -skD - "${f.url ? new URL(f.url).origin : 'https://SEU-SITE.com'}/.well-known/security.txt" -o /dev/null`,
+    proofOfWork: `curl -sk "${f.url ? new URL(f.url).origin : 'https://SEU-SITE.com'}/.well-known/security.txt" | head -n 10`,
     online: `https://securitytxt.org/`,
   }),
 
   idor: (f) => ({
-    title: `Confirmar IDOR`,
+    title: `Validação & Prova Real para IDOR`,
     steps: [
-      `Trocar o ID na requisição autenticada e verificar se acessa recurso de outro usuário.`,
+      `1. Teste focado: Substituir o ID na rota pelo ID de outro usuário.`,
+      `2. PROVA REAL: Fazer a requisição com o token/cookie da Conta B acessando os dados da Conta A e comparar os hashes do payload retornado.`,
     ],
-    devtools: `F12 → Network → testar troca de ID na URL/parâmetros.`,
+    devtools: `F12 → Network → re-executar requisição trocando ID.`,
     automated: `curl -sk -H "Cookie: SESSION_USUARIO_B" "${f.url || 'https://SEU-SITE.com/api/recurso/ID_USUARIO_A'}"`,
   }),
 
   open_redirect: (f) => ({
-    title: `Confirmar Open Redirect`,
+    title: `Validação & Prova Real para Open Redirect`,
     steps: [
-      `Testar parâmetro de redirecionamento para site externo.`,
+      `1. Teste focado: Injetar URL externa no parâmetro.`,
+      `2. PROVA REAL: Exibir o header Location retornado pelo servidor confirmando o redirecionamento para o domínio externo.`,
     ],
-    devtools: `F12 → Network → verificar header Location.`,
+    devtools: `F12 → Network → checar Location header.`,
     automated: `curl -skD - "${(f.url || 'https://SEU-SITE.com') + '?next=https://evil.com'}" -o /dev/null | grep -i "location"`,
+    proofOfWork: `curl -skD - "${(f.url || 'https://SEU-SITE.com') + '?redirect=https://example.com'}" -o /dev/null | grep -i "location"`,
   }),
 
   backup_file: (f) => ({
-    title: `Confirmar arquivo de backup exposto`,
+    title: `Validação & Prova Real para Arquivo de Backup Exposto`,
     steps: [
-      `Acessar a URL do arquivo de backup em modo anônimo.`,
+      `1. Teste focado: Checar se o arquivo .bak/.old responde com HTTP 200.`,
+      `2. PROVA REAL: Baixar o arquivo (primeiros 50 bytes) e verificar o número de linhas ou tipo de arquivo.`,
     ],
-    devtools: `Abrir em aba InPrivate: ${f.url || 'URL do arquivo'}`,
+    devtools: `Acessar URL do arquivo de backup.`,
     automated: `curl -skD - "${f.url || 'https://SEU-SITE.com/arquivo.bak'}" -o /dev/null`,
+    proofOfWork: `curl -sk "${f.url || 'https://SEU-SITE.com/arquivo.bak'}" | head -c 100`,
   }),
 
   http_method: (f) => ({
-    title: `Confirmar método HTTP ${f.method || 'inseguro'} habilitado`,
+    title: `Validação & Prova Real para Métodos HTTP Inseguros`,
     steps: [
-      `Testar envio do método HTTP especificado.`,
+      `1. Teste focado: Testar se o método responde 200 OK.`,
+      `2. PROVA REAL: Executar o método TRACE/OPTIONS e exibir os métodos permitidos retornados no header \`Allow:\`.`,
     ],
     devtools: `F12 → Console → fetch com método customizado.`,
     automated: `curl -skD - -X ${f.method || 'TRACE'} "${f.url || 'https://SEU-SITE.com'}" -o /dev/null`,
+    proofOfWork: `curl -skD - -X OPTIONS "${f.url || 'https://SEU-SITE.com'}" -o /dev/null | grep -i "allow"`,
   }),
 
   // ════════════════════════════════════════════════════
@@ -458,9 +488,10 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   console_error: (f) => ({
-    title: `Confirmar erros de JavaScript no console`,
+    title: `Validação & Prova Real para Erros JS`,
     steps: [
-      `F12 → Console → filtrar por erros em vermelho.`,
+      `1. Teste focado: Inspecionar o console.`,
+      `2. PROVA REAL: Abrir a aba Console do DevTools e filtrar por "Errors".`,
     ],
     devtools: `F12 → Console → filtro "Errors".`,
   }),
@@ -470,9 +501,10 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   vulnerable_library: (f) => ({
-    title: `Confirmar versão vulnerável da biblioteca ${f.library || '?'}`,
+    title: `Validação & Prova Real para Biblioteca Vulnerável`,
     steps: [
-      `Verificar versão da biblioteca no console ou cabeçalho do código.`,
+      `1. Teste focado: Consultar a versão no Console.`,
+      `2. PROVA REAL: Extrair a versão diretamente do cabeçalho do arquivo .js carregado na aba Sources.`,
     ],
     devtools: `F12 → Console → verificar versão.`,
     automated: `curl -sk "${f.url || ''}" | grep -oP "${f.library || 'jquery'}\\/[0-9]+\\.[0-9]+\\.[0-9]+"`,
@@ -484,9 +516,10 @@ const VERIFICATION_MAP = {
   // ════════════════════════════════════════════════════
 
   browser_issue: (f) => ({
-    title: `Confirmar: ${f.label || f.code || 'issue do navegador'}`,
+    title: `Validação & Prova Real para Issue do Navegador`,
     steps: [
-      `F12 → aba "Issues" → verificar detalhes.`,
+      `1. Teste focado: Checar no DevTools ▸ Issues.`,
+      `2. PROVA REAL: Inspecionar a aba Issues no F12 para ver a diretiva violada.`,
     ],
     devtools: `F12 → Issues → localizar "${f.code || f.label}".`,
   }),
@@ -495,14 +528,14 @@ const VERIFICATION_MAP = {
 // ── Fallback genérico ───────────────────────────────────────
 
 const GENERIC_VERIFICATION = (f) => ({
-  title: `Verificar: ${f.label || f.type}`,
+  title: `Validação & Prova Real: ${f.label || f.type}`,
   steps: [
-    `Tipo de achado: ${f.type}`,
-    `Descrição: ${f.risk || '(ver acima)'}`,
-    f.url ? `URL afetada: ${f.url}` : `Verificar na página auditada.`,
+    `1. Teste focado: ${f.type}`,
+    `2. PROVA REAL: ${f.risk || 'Inspecionar na página auditada'}`,
   ],
   devtools: `F12 → verificar conforme a descrição.`,
   automated: f.url ? `curl -skD - "${f.url}" -o /dev/null` : null,
+  proofOfWork: f.url ? `curl -skD - "${f.url}" -o /dev/null` : null,
 });
 
 VERIFICATION_MAP['login_no_csrf'] = VERIFICATION_MAP['login_no_csrf'] || VERIFICATION_MAP['form_no_csrf'];

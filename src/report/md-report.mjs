@@ -157,7 +157,14 @@ export function generateEnterpriseMd({
         lines.push('');
         lines.push(`**🧪 Como Verificar:**`);
         mv.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
-        if (mv.automated) lines.push(`\`\`\`\n${mv.automated}\n\`\`\``);
+        if (mv.automated) {
+          lines.push(`**Comando de Validação (Teste Focado):**`);
+          lines.push(`\`\`\`bash\n${mv.automated}\n\`\`\``);
+        }
+        if (mv.proofOfWork) {
+          lines.push(`**Comando de Prova Real (Dump Completo):**`);
+          lines.push(`\`\`\`bash\n${mv.proofOfWork}\n\`\`\``);
+        }
       }
 
       lines.push('');
