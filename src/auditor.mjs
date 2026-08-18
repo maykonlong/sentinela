@@ -38,6 +38,9 @@ import { checkDnsblReputation } from './infra/dnsbl-reputation.mjs';
 import { analyzeSocialCards } from './infra/social-cards.mjs';
 import { analyzeDnsSecurity } from './infra/dns-scanner.mjs';
 
+// Módulo LGPD & Compliance de Privacidade
+import { analyzeUrlPii, analyzeStoragePii, analyzeLgpdPage, analyzeTrackingBeforeConsent } from './rules/lgpd-rules.mjs';
+
 // Geradores de testes e verificação manual
 import { generateTestArtifacts } from './generators/test-generator.mjs';
 import { enrichWithVerification } from './generators/manual-verification.mjs';
@@ -2514,6 +2517,29 @@ async function main() {
       risk: 'Erros de JavaScript podem indicar bugs ou falhas que facilitam exploração (ex.: entrada não tratada).',
       recommendation: 'Investigar e corrigir os erros de console; eles não deveriam aparecer em produção.',
     });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  ⚖️ MÓDULO LGPD & COMPLIANCE DE PRIVACIDADE
+  // ══════════════════════════════════════════════════════════
+  try {
+    const urlPii = analyzeUrlPii(targetUrl);
+    const storagePii = analyzeStoragePii(storageSnapshotAfter, targetUrl);
+    const lgpdPageFindings = await analyzeLgpdPage(page, targetUrl);
+    const trackingFindings = analyzeTrackingBeforeConsent(capturedRoutes, targetUrl);
+
+    const lgpdFindings = [...urlPii, ...storagePii, ...lgpdPageFindings, ...trackingFindings].map(f => ({
+      ...f,
+      phase: f.phase || 'PRÉ-LOGIN',
+    }));
+
+    if (lgpdFindings.length > 0) {
+      console.log(chalk.magenta(`\n  ⚖️  Módulo LGPD & Privacidade: ${lgpdFindings.length} achado(s) de compliance`));
+      lgpdFindings.forEach(logFinding);
+      allFindings.push(...lgpdFindings);
+    }
+  } catch (err) {
+    console.log(chalk.gray(`  (LGPD check error: ${err.message})`));
   }
 
   // Classificar por origem qualquer finding (rede etc.) ainda sem rótulo de parte.

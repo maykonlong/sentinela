@@ -53,6 +53,14 @@ export function generateEnterpriseMd({
   }
   lines.push('');
 
+  // ── Módulo LGPD & Compliance ──
+  const lgpdIssues = (findings || []).filter(f => f.type.startsWith('pii_') || f.type.includes('privacy') || f.type.includes('optin') || f.type.includes('cookie_consent'));
+  lines.push('## ⚖️ LGPD & Compliance de Privacidade (Lei 13.709/2018)');
+  lines.push('');
+  lines.push(`- **Status de Conformidade:** ${lgpdIssues.length ? '⚠️ ' + lgpdIssues.length + ' Ponto(s) de Atenção' : '✅ Conforme'}`);
+  lines.push('- **Multa Máxima Prevista (Art. 52):** Até 2% do faturamento ou R$ 50.000.000,00 por infração.');
+  lines.push('');
+
   // ── Regressão ──
   if (regression && regression.hasPrev) {
     const delta = score - (regression.prevScore ?? score);

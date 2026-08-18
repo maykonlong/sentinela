@@ -6,13 +6,14 @@
  */
 
 const CATEGORIES = [
-  { id: 'headers',   label: 'Headers de Segurança',         maxPts: 20, types: ['missing_security_header', 'weak_security_header', 'information_disclosure_header', 'cors_wildcard', 'cors_credentials'] },
-  { id: 'cookies',   label: 'Cookies',                      maxPts: 20, types: ['cookie_insecure_flags', 'cookie_sensitive_no_httponly'] },
+  { id: 'headers',   label: 'Headers de Segurança',         maxPts: 15, types: ['missing_security_header', 'weak_security_header', 'information_disclosure_header', 'cors_wildcard', 'cors_credentials'] },
+  { id: 'cookies',   label: 'Cookies',                      maxPts: 15, types: ['cookie_insecure_flags', 'cookie_sensitive_no_httponly'] },
   { id: 'tls',       label: 'TLS / Certificado',            maxPts: 15, types: ['weak_tls', 'cert_expired', 'cert_expiring', 'cert_self_signed', 'no_https'] },
-  { id: 'storage',   label: 'Storage (localStorage/session)', maxPts: 10, types: ['storage_sensitive_data', 'storage_jwt_exposed'] },
+  { id: 'storage',   label: 'Storage (localStorage/session)', maxPts: 10, types: ['storage_sensitive_data', 'storage_jwt_exposed', 'pii_in_storage', 'pii_in_storage_value'] },
   { id: 'code',      label: 'Código-fonte',                 maxPts: 15, types: ['exposed_key', 'dangerous_code', 'missing_sri', 'frontend_role_definition', 'source_map_exposed', 'global_variable_sensitive'] },
-  { id: 'network',   label: 'Rede e API',                   maxPts: 10, types: ['mixed_content', 'token_in_url', 'password_in_url', 'credential_in_url', 'token_in_non_auth_response'] },
+  { id: 'network',   label: 'Rede e API',                   maxPts: 10, types: ['mixed_content', 'token_in_url', 'password_in_url', 'credential_in_url', 'token_in_non_auth_response', 'pii_in_url', 'pii_in_url_value'] },
   { id: 'infra',     label: 'Infraestrutura',               maxPts: 10, types: ['exposed_port', 'ip_blacklisted'] },
+  { id: 'lgpd',      label: 'LGPD & Privacidade',           maxPts: 10, types: ['missing_privacy_policy', 'missing_form_optin', 'cookie_consent_violation'] },
 ];
 
 const PENALTY = { CRITICAL: 15, HIGH: 6, MEDIUM: 2, LOW: 0.5 };

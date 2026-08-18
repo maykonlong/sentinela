@@ -218,6 +218,37 @@ export function generateEnterpriseHtml({
     <p style="margin-top:12px;font-size:12px;color:#868e96">Auditoria realizada em ${new Date(meta.timestamp).toLocaleString('pt-BR')} · ${meta.pagesAudited} página(s) · Fases: PRÉ-LOGIN → LOGIN → PÓS-LOGIN</p>
   </div>`;
 
+  // ── Módulo LGPD & Compliance ──
+  const lgpdIssues = findings.filter(f => f.type.startsWith('pii_') || f.type.includes('privacy') || f.type.includes('optin') || f.type.includes('cookie_consent'));
+  const piiIssues = findings.filter(f => f.type.startsWith('pii_'));
+  const consentIssues = findings.filter(f => f.type === 'cookie_consent_violation');
+
+  const lgpdHtml = `
+  <div class="section" style="background:#fff9db;border:1px solid #ffe066">
+    <h2>⚖️ LGPD & Compliance de Privacidade (Lei 13.709/2018)</h2>
+    <p style="font-size:13px;color:#664d03;margin-bottom:12px">
+      Avaliação das obrigações de transparência, proteção de dados pessoais (PII) e consentimento exigidas pela Lei Geral de Proteção de Dados.
+    </p>
+    <div class="infra-grid">
+      <div class="infra-card">
+        <div class="ic-label">Status de Compliance</div>
+        <div class="ic-value" style="color:${lgpdIssues.length ? '#c92a2a' : '#2f9e44'}">${lgpdIssues.length ? '⚠️ ' + lgpdIssues.length + ' Ponto(s) de Atenção' : '✅ Adequado'}</div>
+      </div>
+      <div class="infra-card">
+        <div class="ic-label">Exposição de PII (CPF/E-mail/Dados)</div>
+        <div class="ic-value" style="color:${piiIssues.length ? '#c92a2a' : '#2f9e44'}">${piiIssues.length ? '❌ Exposição Detectada' : '✅ Nenhum Vazamento'}</div>
+      </div>
+      <div class="infra-card">
+        <div class="ic-label">Consentimento de Cookies</div>
+        <div class="ic-value" style="color:${consentIssues.length ? '#f08c00' : '#2f9e44'}">${consentIssues.length ? '⚠️ Rastreio Sem Opt-in' : '✅ Conforme'}</div>
+      </div>
+      <div class="infra-card">
+        <div class="ic-label">Multa Máxima Prevista (Art. 52)</div>
+        <div class="ic-value" style="color:#c92a2a">Até 2% Faturamento / R$ 50 Mi</div>
+      </div>
+    </div>
+  </div>`;
+
   // ── Score Breakdown ──
   const breakdownHtml = `
   <div class="section">
@@ -624,6 +655,7 @@ ${css}
   <div class="note">Contagem e nota consideram <b>apenas o seu código/config (1ª parte)</b>. Achados em bibliotecas e domínios de terceiros aparecem à parte e não afetam a nota.</div>
 
   ${execSummaryHtml}
+  ${lgpdHtml}
   ${regHtml}
   ${infraHtml}
   ${breakdownHtml}
