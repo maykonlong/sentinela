@@ -632,6 +632,18 @@ export function generateEnterpriseHtml({
         btn.innerHTML = originalText;
       }, 2000);
     }
+
+    function filterFindings(sev, btn) {
+      document.querySelectorAll('.filter-btn').forEach(b => b.style.opacity = '0.6');
+      if (btn) btn.style.opacity = '1';
+      document.querySelectorAll('.finding').forEach(el => {
+        if (sev === 'ALL' || el.classList.contains('sev-' + sev)) {
+          el.style.display = 'block';
+        } else {
+          el.style.display = 'none';
+        }
+      });
+    }
   </script>`;
 
   // ── Montagem Final ──
@@ -671,7 +683,16 @@ ${css}
   ${breakdownHtml}
 
   <div class="section">
-    <h2>🔎 Achados (seu código / config)</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+      <h2 style="margin:0;border:none">🔎 Achados (${findings.length})</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-action filter-btn" onclick="filterFindings('ALL', this)" style="background:#495057">Todos (${findings.length})</button>
+        <button class="btn-action filter-btn" onclick="filterFindings('CRITICAL', this)" style="background:#c92a2a;opacity:0.6">🔴 CRITICAL (${counts.CRITICAL})</button>
+        <button class="btn-action filter-btn" onclick="filterFindings('HIGH', this)" style="background:#e8590c;opacity:0.6">🟠 HIGH (${counts.HIGH})</button>
+        <button class="btn-action filter-btn" onclick="filterFindings('MEDIUM', this)" style="background:#f08c00;opacity:0.6">🟡 MEDIUM (${counts.MEDIUM})</button>
+        <button class="btn-action filter-btn" onclick="filterFindings('LOW', this)" style="background:#1c7ed6;opacity:0.6">🔵 LOW (${counts.LOW})</button>
+      </div>
+    </div>
     ${findings.length ? owaspSections : '<p>Nenhum problema de 1ª parte encontrado. 🎉</p>'}
   </div>
 
