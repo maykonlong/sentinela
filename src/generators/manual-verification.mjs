@@ -568,6 +568,82 @@ const VERIFICATION_MAP = {
   },
 
   // ════════════════════════════════════════════════════
+  // LGPD & COMPLIANCE DE PRIVACIDADE
+  // ════════════════════════════════════════════════════
+
+  pii_in_url: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Dado Pessoal (PII) na URL`,
+      steps: [
+        `1. Teste focado: Inspecionar os parâmetros da URL em busca de dados pessoais.`,
+        `2. PROVA REAL: Verificar o histórico do navegador e os logs do servidor web onde a URL completa fica gravada em texto claro.`,
+      ],
+      devtools: `F12 → Console → window.location.search`,
+      consoleSnippet: `new URLSearchParams(window.location.search).get('${f.paramKey || 'cpf'}') ? '⚠️ PII EXPOSTO NA URL' : '✅ Limpo'`,
+      automated: `curl -skD - "${url}" -o /dev/null`,
+      proofOfWork: `curl -skD - "${url}" -o /dev/null`,
+    };
+  },
+
+  pii_in_storage: (f) => ({
+    title: `Validação & Prova Real para PII no Storage`,
+    steps: [
+      `1. Teste via Console: Inspecionar o item "${f.key || 'cpf'}" no ${f.storeType || 'localStorage'}.`,
+      `2. PROVA REAL: Imprimir o dado em texto claro provando que qualquer script 3ª parte consegue ler sem autorização.`,
+    ],
+    devtools: `F12 → Application → ${f.storeType || 'Local Storage'} → chave "${f.key}".`,
+    consoleSnippet: `${f.storeType || 'localStorage'}.getItem("${f.key || 'cpf'}")`,
+    automated: `${f.storeType || 'localStorage'}.getItem("${f.key || 'cpf'}")`,
+    proofOfWork: `console.log("${f.key}:", ${f.storeType || 'localStorage'}.getItem("${f.key || 'cpf'}"))`,
+  }),
+
+  missing_privacy_policy: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Ausência de Política de Privacidade (LGPD)`,
+      steps: [
+        `1. Teste focado: Buscar no DOM do HTML links para 'privacidade' ou 'lgpd'.`,
+        `2. PROVA REAL: Listar todos os links da página para confirmar a inexistência do link de transparência.`,
+      ],
+      devtools: `F12 → Console → verificar links de rodapé.`,
+      consoleSnippet: `Array.from(document.querySelectorAll('a[href]')).filter(a => /privacidade|privacy|lgpd/i.test(a.href + a.innerText)).length ? '✅ Política Encontrada' : '❌ AUSENTE (Violação LGPD Art. 9º)'`,
+      automated: `curl -sk "${url}" | grep -iE "privacidade|privacy|lgpd"`,
+      proofOfWork: `curl -sk "${url}" | grep -n -i "href=" | grep -iE "privacidade|privacy|lgpd"`,
+    };
+  },
+
+  missing_form_optin: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Opt-in em Formulário (LGPD)`,
+      steps: [
+        `1. Teste focado: Buscar checkboxes de aceite em formulários de cadastro.`,
+        `2. PROVA REAL: Inspecionar o HTML das tags <form> para garantir a presença de um checkbox não pré-marcado.`,
+      ],
+      devtools: `F12 → Elements → inspecionar os campos do formulário.`,
+      consoleSnippet: `Array.from(document.forms).map(f => ({ action: f.action, hasConsentCheckbox: !!f.querySelector('input[type="checkbox"]') }))`,
+      automated: `curl -sk "${url}" | grep -iE "<form|<input.*checkbox"`,
+      proofOfWork: `curl -sk "${url}" | grep -n -C 5 -i "<form"`,
+    };
+  },
+
+  cookie_consent_violation: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Disparo de Cookies Sem Consentimento`,
+      steps: [
+        `1. Teste focado: Inspecionar requisições para domínios de rastreamento (Analytics/Pixel/Hotjar) na abertura inicial.`,
+        `2. PROVA REAL: Exibir os scripts de terceiros injetados antes da interação do usuário com o banner LGPD.`,
+      ],
+      devtools: `F12 → Network → filtrar "analytics", "pixel", "facebook" ou "hotjar".`,
+      consoleSnippet: `Array.from(document.scripts).map(s => s.src).filter(src => /google-analytics|facebook\.net|hotjar|tiktok|clarity/i.test(src))`,
+      automated: `curl -sk "${url}" | grep -iE "google-analytics|facebook\.net|hotjar|tiktok|clarity"`,
+      proofOfWork: `curl -sk "${url}" | grep -n -i "<script"`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
   // REDE / MISCELÂNEA
   // ════════════════════════════════════════════════════
 
