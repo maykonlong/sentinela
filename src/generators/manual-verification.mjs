@@ -3,19 +3,26 @@
  *
  * Para cada tipo de achado, gera instruções passo-a-passo detalhadas de como
  * um profissional/empresa pode confirmar o problema sem depender do Sentinela.
- *
- * Princípios:
- *  - Todo achado TEM instruções de verificação (sem fallback vazio)
- *  - Passos concretos: o que clicar, o que digitar, o que procurar
- *  - Comandos de terminal prontos para copiar/colar (com o host/URL real)
- *  - Link para ferramenta online quando aplicável
- *  - DevTools step-by-step (menu exato, aba, campo)
  */
 
 function hostname(f) {
   if (f.host) return f.host;
   if (f.url) { try { return new URL(f.url).hostname; } catch { return f.url; } }
   return 'SEU-HOST';
+}
+
+function hostAndPort(f, defaultPort = 443) {
+  if (f.url) {
+    try {
+      const u = new URL(f.url);
+      const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+      return `${u.hostname}:${port}`;
+    } catch { /* fallback */ }
+  }
+  if (f.host) {
+    return `${f.host}:${f.port || defaultPort}`;
+  }
+  return `SEU-HOST:${defaultPort}`;
 }
 
 const VERIFICATION_MAP = {
@@ -206,10 +213,10 @@ const VERIFICATION_MAP = {
     steps: [
       `Clicar no cadeado na barra do navegador.`,
       `Ir em "Connection is secure" → "Certificate" → verificar "Valid until".`,
-      `Ou executar o comando abaixo — "notAfter" mostrará a data de expiração.`,
+      `Ou executar o comando abaixo — "notAfter" mostrará a data de expiração da porta ${hostAndPort(f)}.`,
     ],
     devtools: `F12 → Security → "View certificate" → verificar "Valid until".`,
-    automated: `echo | openssl s_client -connect ${hostname(f)}:443 2>/dev/null | openssl x509 -enddate -noout`,
+    automated: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -enddate -noout`,
     online: `https://www.sslshopper.com/ssl-checker.html#hostname=${hostname(f)}`,
   }),
 
@@ -217,11 +224,11 @@ const VERIFICATION_MAP = {
     title: `Confirmar que o certificado TLS vence em breve`,
     steps: [
       `Clicar no cadeado → "Certificate" → verificar a data "Valid until".`,
-      `Ou executar o comando abaixo — mostra quantos dias faltam.`,
+      `Ou executar o comando abaixo apontando para o servidor/porta ${hostAndPort(f)}.`,
       `Configurar renovação automática (certbot renew --dry-run para testar).`,
     ],
     devtools: `F12 → Security → "View certificate" → verificar "Valid until".`,
-    automated: `echo | openssl s_client -connect ${hostname(f)}:443 2>/dev/null | openssl x509 -enddate -noout`,
+    automated: `echo | openssl s_client -connect ${hostAndPort(f)} 2>/dev/null | openssl x509 -enddate -noout`,
   }),
 
   no_https: (f) => ({
