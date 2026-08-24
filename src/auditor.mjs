@@ -56,6 +56,7 @@ import { generateEnterpriseHtml } from './report/html-report.mjs';
 import { generateEnterpriseMd } from './report/md-report.mjs';
 import { exportPdf } from './report/pdf-export.mjs';
 import { generateSarif } from './report/sarif-export.mjs';
+import { verifyFindingsWithLlm } from './verify/llm-verify.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -73,6 +74,7 @@ let secondAccountMode = args.includes('--second-account');
 let assumeYes = args.includes('--yes') || args.includes('-y');
 let recordHar = !args.includes('--no-har');
 let failOn = null;   // gate de CI: severidade mínima que reprova (exit != 0)
+let llmVerify = false; // revisão adversarial por IA (LLM) dos achados (opt-in)
 let scope = null;
 let loginTimeout = 300000;
 let navIdleMs = 180000;
@@ -107,6 +109,9 @@ function parseConfiguration() {
     const valid = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
     failOn = valid.includes(raw) ? raw : 'HIGH'; // padrão sensato se vier vazio/errado
   }
+
+  // Revisão por IA (LLM) dos achados: --verify-llm ou --llm. Exige ANTHROPIC_API_KEY.
+  if (args.includes('--verify-llm') || args.includes('--llm')) llmVerify = true;
 }
 
 // Nota: a validação de `targetUrl` NÃO pode rodar aqui no top-level do módulo.
@@ -139,6 +144,8 @@ function printUsageAndExit() {
   console.log(chalk.gray('  --headless   Rodar sem janela (CI/automação; usa Chromium)'));
   console.log(chalk.gray('  --fail-on=X  Gate CI: reprova (exit 2) se houver achado 1ª parte'));
   console.log(chalk.gray('               >= X (critical|high|medium|low). Sempre gera SARIF.'));
+  console.log(chalk.gray('  --verify-llm Revisão adversarial por IA dos achados (--llm).'));
+  console.log(chalk.gray('               Exige ANTHROPIC_API_KEY; sem ela, marca "não verificado".'));
   console.log(chalk.gray('  --yes / -y   Não perguntar nada, usar padrões/flags'));
   process.exit(1);
 }
@@ -1466,6 +1473,18 @@ async function askStartupQuestions() {
     const a = await prompt(chalk.white('   Rodar testes ATIVOS (métodos HTTP, .git/.env, security.txt)? Só com autorização do alvo [s/N]: '));
     activeMode = /^(s|y)/i.test(a);
   }
+  // Modo de verificação: determinístico (padrão, offline) ou com revisão por IA.
+  if (!llmVerify) {
+    console.log(chalk.cyan.bold('\n🤖 Verificação dos achados:'));
+    console.log('   1) SEM IA — só as checagens determinísticas (offline, padrão)');
+    console.log('   2) COM IA (LLM) — revisão adversarial de cada achado p/ cortar');
+    console.log('      falso-positivo (exige ANTHROPIC_API_KEY; consome tokens/custo)');
+    const v = await prompt(chalk.white('\n   Escolha [1-2] (padrão 1): '));
+    llmVerify = /^2/.test(v.trim());
+    if (llmVerify && !process.env.ANTHROPIC_API_KEY) {
+      console.log(chalk.yellow('   ⚠️  ANTHROPIC_API_KEY não está definida — a revisão por IA vai marcar os achados como "não verificado por IA" em vez de inventar veredito.'));
+    }
+  }
 }
 
 // ─── Issues do navegador (CDP Audits) ─────────────────────
@@ -2653,7 +2672,24 @@ async function main() {
   }
 
   // Deduplicar findings
-  const uniqueFindings = deduplicateFindings(allFindings);
+  let uniqueFindings = deduplicateFindings(allFindings);
+
+  // Revisão adversarial por IA (opt-in). Anota cada achado com `llm`. Honesto:
+  // sem ANTHROPIC_API_KEY não roda, marca "não verificado" — nunca inventa.
+  if (llmVerify) {
+    console.log(chalk.magenta('\n🤖 Revisão por IA (LLM) dos achados...'));
+    try {
+      const { findings: verified, summary } = await verifyFindingsWithLlm(uniqueFindings);
+      uniqueFindings = verified;
+      if (summary.ran) {
+        console.log(chalk.cyan(`  IA (${summary.model}): ${chalk.green(summary.confirmados + ' confirmados')}, ${chalk.yellow(summary.refutados + ' refutados')}, ${summary.naoVerificados} não verificados.`));
+      } else {
+        console.log(chalk.yellow(`  ⚠️  Revisão por IA NÃO rodou: ${summary.motivo}. Achados marcados como "não verificado por IA" (nada foi inventado).`));
+      }
+    } catch (err) {
+      console.log(chalk.gray(`  (revisão por IA falhou: ${err.message})`));
+    }
+  }
 
   // Gerar relatório
   console.log(chalk.cyan('\n📝 Gerando relatório...'));

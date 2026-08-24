@@ -62,6 +62,12 @@ Ignora o daemon/sessões; roda uma auditoria e sai. Aceita:
   de 1ª parte naquela severidade ou acima — **mesmos exit codes** do
   `sentinela.mjs` (`3`=CRITICAL presente, `2`=HIGH/abaixo presente, `0`=limpo).
 - Sempre gera o **`.sarif`** (ver tabela abaixo), independente das flags.
+- **`--verify-llm`** (ou `--llm`): revisão adversarial por IA — cada achado é
+  anotado com `llm: {verified, real, confianca, severidadeSugerida, motivo}`
+  para cortar falso-positivo. **Exige `ANTHROPIC_API_KEY`**; sem ela, marca tudo
+  como `llm.verified=false` ("não verificado por IA") — nunca inventa veredito.
+  Modelo padrão Haiku (barato); override por `SENTINELA_LLM_MODEL`. No modo
+  interativo, o launcher **pergunta** "com IA ou sem IA" ao iniciar.
 
 ```bash
 node src/auditor.mjs https://alvo --active --yes --headless --fail-on=high

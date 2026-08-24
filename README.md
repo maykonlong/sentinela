@@ -79,6 +79,11 @@ npm run audit:active -- https://seu-alvo.com
 # CI/automação: headless + gate. Reprova o build (exit 2) se houver achado
 # de 1ª parte com severidade >= high. Gera sempre o .sarif para o Code Scanning.
 node src/auditor.mjs https://seu-alvo.com --active --yes --headless --fail-on=high
+
+# Com revisão por IA (LLM): cada achado é revisado adversarialmente p/ cortar
+# falso-positivo. Exige ANTHROPIC_API_KEY; sem ela, marca "não verificado".
+# No modo interativo, o Sentinela PERGUNTA "com IA ou sem IA" ao iniciar.
+ANTHROPIC_API_KEY=sk-... node src/auditor.mjs https://seu-alvo.com --active --verify-llm
 ```
 
 ---
