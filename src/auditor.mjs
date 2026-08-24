@@ -166,6 +166,8 @@ const seenLibraryVersion = new Set();
 // segurança — ver comentário em collectPageData.
 const documentHeaders = new Map();
 let lastNavActivity = 0;              // timestamp da última página nova (modo navegação)
+let liveAuditActive = false;         // audita ativamente cada página nova (só no modo navegação, pós-login)
+let liveAuditBusy = false;           // trava contra collectPageData concorrente na mesma page
 const firstPartyAssets = [];         // URLs de JS/CSS do seu domínio (p/ backup guessing)
 const seenAssets = new Set();
 let reconCandidatePaths = [];         // paths do recon (robots/sitemap/dicionário)
@@ -1101,32 +1103,53 @@ async function collectInternalLinks(page) {
 
 // Audita CADA nova página que o usuário visitar (modo navegação livre).
 // Retorna uma função para parar o monitoramento.
+// Chave de identidade da PÁGINA para dedup. Inclui o hash SÓ quando ele é uma
+// rota de SPA (#/rota, #!/rota) — assim navegação por hash-router conta como
+// página nova, mas âncoras (#secao) não disparam re-auditoria à toa.
+function routeKey(u) {
+  try {
+    const url = new URL(u);
+    const isHashRoute = /^#!?\//.test(url.hash);
+    return url.origin + url.pathname + url.search + (isHashRoute ? url.hash : '');
+  } catch {
+    return (u || '').split('#')[0];
+  }
+}
+
+// Audita a página atual se a rota ainda não foi vista. Usado pelo poller, pelo
+// framenavigated e pelos hooks de SPA (History API/hashchange) — todos passam
+// por aqui, com trava única contra execução concorrente.
+async function auditPageIfNew(page, rawUrl, reason) {
+  const key = routeKey(rawUrl || '');
+  if (!key || key.includes('about:blank') || visitedUrls.has(key)) return;
+  if (liveAuditBusy) return; // ocupado → o poller (2,5s) tenta de novo depois
+  liveAuditBusy = true;
+  visitedUrls.add(key);
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
+    console.log(chalk.cyan(`  📄 ${reason} — auditando: ${key}`));
+    const findings = await collectPageData(page, page.url());
+    allFindings.push(...findings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
+    lastNavActivity = Date.now(); // reinicia o timer de inatividade
+  } catch (e) {
+    console.log(chalk.gray(`  (pulei ${key}: ${e.message})`));
+  } finally {
+    liveAuditBusy = false;
+  }
+}
+
 function startLivePageAuditor(page) {
-  let busy = false;
+  liveAuditActive = true; // habilita também o framenavigated e os hooks de SPA
   // NÃO inicia o relógio de inatividade aqui: só começa a contar depois da
   // primeira página nova auditada — assim o login/2FA (que não navega) nunca
-  // encerra a sessão cedo demais.
-  const interval = setInterval(async () => {
-    if (busy) return;
+  // encerra a sessão cedo demais. O poller é a rede de segurança: cobre páginas
+  // que não dispararam framenavigated nem evento de SPA.
+  const interval = setInterval(() => {
     let url;
     try { url = page.url(); } catch { return; }
-    const clean = (url || '').split('#')[0];
-    if (!clean || clean === 'about:blank' || visitedUrls.has(clean)) return;
-    busy = true;
-    visitedUrls.add(clean);
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
-      console.log(chalk.cyan(`  📄 Página visitada — auditando: ${clean}`));
-      const findings = await collectPageData(page, clean);
-      allFindings.push(...findings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
-      lastNavActivity = Date.now(); // registra atividade → reinicia o timer de inatividade
-    } catch (e) {
-      console.log(chalk.gray(`  (pulei ${clean}: ${e.message})`));
-    } finally {
-      busy = false;
-    }
+    auditPageIfNew(page, url, 'página visitada').catch(() => {});
   }, 2500);
-  return () => clearInterval(interval);
+  return () => { clearInterval(interval); liveAuditActive = false; };
 }
 
 // ─── Gerador de Relatório ──────────────────────────────────
@@ -1532,6 +1555,36 @@ async function main() {
   try { await context.clearCookies(); } catch { /* ok */ }
 
   const page = await context.newPage();
+
+  // ── Cobertura de SPA ──────────────────────────────────────
+  // O poller de 2,5s sozinho perde: (a) rotas de SPA que não trocam o
+  // documento (History API/pushState) e (b) telas atravessadas rápido demais.
+  // Aqui capturamos navegação real (framenavigated), History API e hash-route.
+  // Só AUDITA ativamente quando o live auditor está ligado (modo navegação,
+  // pós-login) — a rede/tokens já são capturados sempre pelos on('request/response').
+  try {
+    await page.exposeFunction('__sentinelaRoute', (u) => {
+      if (liveAuditActive) auditPageIfNew(page, u || page.url(), 'rota SPA (History API)').catch(() => {});
+    });
+    await page.addInitScript(() => {
+      const notify = () => { try { window.__sentinelaRoute && window.__sentinelaRoute(location.href); } catch { /* ignore */ } };
+      for (const m of ['pushState', 'replaceState']) {
+        const orig = history[m];
+        if (typeof orig === 'function') {
+          history[m] = function (...a) { const r = orig.apply(this, a); notify(); return r; };
+        }
+      }
+      window.addEventListener('popstate', notify);
+      window.addEventListener('hashchange', notify);
+    });
+  } catch { /* exposeFunction/addInitScript já registrados — ok */ }
+
+  page.on('framenavigated', (frame) => {
+    try {
+      if (frame !== page.mainFrame() || !liveAuditActive) return;
+      auditPageIfNew(page, frame.url(), 'navegação').catch(() => {});
+    } catch { /* ignore */ }
+  });
 
   // Capturar console (erros/avisos) e exceções JS não tratadas.
   page.on('console', (msg) => {
