@@ -12,6 +12,7 @@ O Sentinela é uma ferramenta de auditoria de segurança web que resolve o probl
 - Toda a rede, requisições, headers, cookies, tokens e APIs
 - Todo o armazenamento local (localStorage, sessionStorage)
 - Código-fonte, scripts, variáveis globais e bibliotecas vulneráveis
+- **Cada página que você abre** (modo `--navigate`), inclusive rotas de SPA (History API `pushState`/`replaceState` e hash-route `#/pagina`)
 - Controle de acesso, IDOR/BOLA, session fixation, mixed content
 - **SQL Injection** (error-based) e, em contexto de cassino/aposta, **vazamento de estado de jogo** (provably-fair)
 - **[NOVO v2.0]** Port scan TCP, socket timing breakdown, GeoIP, reputação IP em blacklists DNS
@@ -64,6 +65,10 @@ npm run audit -- https://seu-alvo.com
 
 # Audit direto na página de login
 node src/auditor.mjs https://seu-alvo.com --login-only --yes
+
+# Navegação livre: você navega e ele audita CADA página nova que abrir —
+# inclusive rotas de SPA (pushState/replaceState e hash-route #/pagina).
+node src/auditor.mjs https://seu-alvo.com --navigate
 
 # Auditoria completa com crawl de links internos
 npm run audit:crawl -- https://seu-alvo.com

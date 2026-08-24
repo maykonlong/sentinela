@@ -135,7 +135,14 @@ Redesenhada. Regras atuais:
 ## Onde as coisas ficam
 
 - `src/auditor.mjs` — orquestrador (fases, coleta, gera relatório no fim de
-  `main()` e chama `process.exit(0)`).
+  `main()` e chama `process.exit(0)`). No modo navegação (`--navigate`) o
+  **live auditor** audita cada página nova que o humano abre: `auditPageIfNew`
+  (dedup por `routeKey`, trava única) é chamada pelo poller de 2,5s, por
+  `page.on('framenavigated')` e pelos hooks de SPA (`addInitScript` +
+  `exposeFunction('__sentinelaRoute')` cobrindo `pushState`/`replaceState`/
+  `popstate`/`hashchange`). `routeKey` inclui o hash só quando é rota (`#/…`,
+  `#!/…`) — âncora (`#secao`) não re-audita. Rede/tokens são capturados sempre
+  pelos `on('request'/'response')`, independente disso.
 - `src/daemon/` — `sentinela-daemon.mjs` (orquestração/timeout/finalize +
   `generateFromSession`), `session-store.mjs` (`sessions/<id>/*.ndjson`),
   `control-server.mjs` (HTTP `:3141`).
