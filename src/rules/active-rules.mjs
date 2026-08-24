@@ -493,3 +493,165 @@ export function checkPasswordPolicyHints(pageHtml, formSelector) {
   });
   return findings;
 }
+
+/** GET com timeout, mesmo contrato do postWithTimeout: null em erro de rede. */
+async function getWithTimeout(request, url, ms = 8000) {
+  try {
+    const t0 = Date.now();
+    const res = await request.get(url, { timeout: ms, failOnStatusCode: false, maxRedirects: 0 });
+    const elapsed = Date.now() - t0;
+    let body = '';
+    try { body = await res.text(); } catch { /* binário/sem corpo */ }
+    return { status: res.status(), elapsed, body };
+  } catch {
+    return null;
+  }
+}
+
+// Assinaturas de erro de banco vazadas na resposta — MySQL/Postgres/MSSQL/
+// Oracle/SQLite. São mensagens de erro do próprio SGBD, não heurística: se
+// aparecem, a entrada chegou crua na query (evidência determinística → confirmado).
+const SQL_ERROR_SIGNS = [
+  /SQL syntax.*MySQL/i, /you have an error in your SQL syntax/i, /MySqlException/i,
+  /valid MySQL result/i, /check the manual that corresponds to your (MySQL|MariaDB)/i,
+  /PostgreSQL.*ERROR/i, /pg_query\(\)|pg_exec\(\)/i, /unterminated quoted string/i,
+  /SQLSTATE\[/i, /Npgsql\./i,
+  /Microsoft SQL (Server|Native)|ODBC SQL Server Driver|OLE DB.*SQL Server/i,
+  /Unclosed quotation mark after the character string/i, /System\.Data\.SqlClient/i,
+  /ORA-\d{5}/i, /Oracle error|quoted string not properly terminated/i,
+  /SQLite\/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite|sqlite3\.OperationalError|unrecognized token/i,
+  /near ".+": syntax error/i, /JDBC.*SQL/i, /SQLException/i,
+];
+
+/**
+ * Teste ATIVO de SQL Injection error-based — só com --active.
+ *
+ * Para cada endpoint candidato (POST de login/form capturado + GET com query
+ * string), injeta UMA aspa simples num parâmetro e procura assinatura de erro de
+ * banco na resposta. Detecção puramente error-based: não tenta autenticar, não
+ * faz boolean/time-based, não faz fuzzing. Poucas requisições, alto sinal.
+ *
+ * Erro de rede/timeout num endpoint → pula ESSE endpoint (ausência de evidência
+ * não é evidência), segue nos demais. Só reporta quando um SGBD reclamou.
+ *
+ * @param {import('playwright').APIRequestContext} request
+ * @param {Array<{url:string, method:string, form?:object}>} candidates
+ */
+export async function checkSqlInjection(request, candidates, opts = {}) {
+  const findings = [];
+  const timeoutMs = opts.timeoutMs || 8000;
+  const seen = new Set();
+  const targets = (candidates || []).filter(c => {
+    if (!c || !c.url) return false;
+    const k = `${c.method || 'GET'} ${c.url.split('?')[0]}`;
+    if (seen.has(k)) return false; seen.add(k); return true;
+  }).slice(0, 8);
+
+  for (const c of targets) {
+    let r = null, where = '';
+    try {
+      if ((c.method || 'GET').toUpperCase() === 'POST' && c.form && typeof c.form === 'object') {
+        // Injeta a aspa no 1º campo do corpo; mantém os demais.
+        const keys = Object.keys(c.form);
+        if (keys.length === 0) continue;
+        const form = { ...c.form };
+        form[keys[0]] = String(form[keys[0]] ?? '') + "'";
+        where = `campo "${keys[0]}" do POST`;
+        r = await postWithTimeout(request, c.url, form, timeoutMs);
+      } else {
+        const u = new URL(c.url);
+        const qk = [...u.searchParams.keys()];
+        if (qk.length === 0) continue;
+        u.searchParams.set(qk[0], (u.searchParams.get(qk[0]) || '') + "'");
+        where = `parâmetro "${qk[0]}" da query`;
+        r = await getWithTimeout(request, u.toString(), timeoutMs);
+      }
+    } catch { continue; }
+    if (!r || !r.body) continue;
+
+    const hit = SQL_ERROR_SIGNS.find(re => re.test(r.body));
+    if (hit) {
+      const snippet = (r.body.match(hit) || [''])[0].slice(0, 140);
+      findings.push({
+        type: 'sqli_suspected', severity: 'CRITICAL', thirdParty: false, phase: 'PÓS-LOGIN', confidence: 'confirmado',
+        label: 'SQL Injection error-based (erro de banco vazado)',
+        url: c.url,
+        currentValue: `injetei ' no ${where} → HTTP ${r.status} devolveu erro de SQL: "${snippet}"`,
+        risk: 'Ao injetar uma aspa simples, o servidor devolveu uma mensagem de erro do banco de dados. Isso indica que a entrada do usuário é concatenada diretamente na query SQL — permite dump do banco, bypass de autenticação e, em alguns casos, execução remota.',
+        recommendation: 'Usar queries parametrizadas / prepared statements em TODAS as consultas. Nunca concatenar entrada do usuário na SQL. Ocultar mensagens de erro do banco em produção.',
+      });
+    }
+  }
+  return findings;
+}
+
+// Contexto de iGaming (cassino/aposta): dispara o teste de vazamento de estado
+// de jogo. Fora desse contexto o teste nem roda (não é aplicável).
+const IGAMING_RE = /mines|crash|dice|roulette|roleta|plinko|aviator|blackjack|baccarat|bacar|slots?|cassino|casino|aposta|\bbet\b|wager|jackpot|keno|\bgame\b|rodada|round/i;
+// Endpoints de estado de rodada (GET) onde faz sentido procurar vazamento.
+const GAME_ENDPOINT_RE = /game|mines|crash|dice|roulette|roleta|plinko|aviator|blackjack|baccarat|slots?|round|rodada|\bbet\b|current|state/i;
+
+/** True se a sessão parece ser de cassino/aposta (URL, título ou rotas). */
+export function looksLikeIgaming(targetUrl, pageTitle, capturedRoutes) {
+  if (IGAMING_RE.test(String(targetUrl || ''))) return true;
+  if (IGAMING_RE.test(String(pageTitle || ''))) return true;
+  return (capturedRoutes || []).some(r => r && !r.thirdParty && IGAMING_RE.test(r.path || r.url || ''));
+}
+
+/**
+ * Seleciona endpoints GET same-domain que parecem ser de estado de jogo.
+ * capturedRoutes guarda host/path (sem URL cheia) → reconstrói com o protocolo.
+ */
+export function pickGameEndpoints(capturedRoutes, proto = 'https:', max = 10) {
+  const seen = new Set();
+  return (capturedRoutes || [])
+    .filter(r => r && !r.thirdParty && (r.method || 'GET').toUpperCase() === 'GET' && GAME_ENDPOINT_RE.test(r.path || r.url || ''))
+    .map(r => r.url || (r.host && r.path ? `${proto}//${r.host}${r.path}` : null))
+    .filter(u => { if (!u || seen.has(u)) return false; seen.add(u); return true; })
+    .slice(0, max);
+}
+
+/**
+ * Teste ATIVO de vazamento de estado de jogo (iGaming / provably-fair) — só com
+ * --active E em contexto de cassino/aposta. Busca endpoints de estado de rodada
+ * e verifica se a resposta expõe o RESULTADO antes do reveal: server seed em
+ * claro (não o hash) ou posições de minas/bombas/resultado com a rodada ativa.
+ * Se vazar, dá para prever/trapacear o jogo.
+ *
+ * @param {import('playwright').APIRequestContext} request
+ * @param {string[]} endpoints  URLs GET de estado de jogo
+ */
+export async function checkGameStateLeak(request, endpoints, opts = {}) {
+  const findings = [];
+  const timeoutMs = opts.timeoutMs || 8000;
+  const targets = (endpoints || []).slice(0, 10);
+
+  for (const url of targets) {
+    const r = await getWithTimeout(request, url, timeoutMs);
+    if (!r || !r.body || !/[{[]/.test(r.body)) continue; // só respostas estruturadas (JSON)
+    const flat = r.body.toLowerCase();
+
+    // Rodada já encerrada revela o resultado legitimamente → ignora.
+    const finished = /"(status|state|phase)"\s*:\s*"(finished|complete[d]?|settled|won|lost|revealed|cashed[_ ]?out|ended|closed|busted)"/.test(flat);
+    if (finished) continue;
+
+    const serverSeedLeak = /"server[_-]?seed"\s*:\s*"[^"]{12,}"/.test(flat); // server_seed_hash NÃO casa (tem _hash antes da aspa)
+    const mineLeak = /"(mines?|bombs?)"\s*:\s*\[\s*[\d{]/.test(flat) ||
+      /"is[_-]?mine"\s*:\s*true/.test(flat) ||
+      (/"(grid|board|tiles)"\s*:/.test(flat) && /"(mine|bomb|is[_-]?mine)"\s*:/.test(flat));
+    const outcomeLeak = /"(winning[_-]?tile|next[_-]?result|outcome|winning[_-]?number|result[_-]?tile)"\s*:/.test(flat);
+
+    if (serverSeedLeak || mineLeak || outcomeLeak) {
+      const what = [serverSeedLeak && 'server seed em claro', mineLeak && 'posições de minas/bombas', outcomeLeak && 'resultado da rodada'].filter(Boolean).join(' + ');
+      findings.push({
+        type: 'game_state_leak', severity: 'HIGH', thirdParty: false, phase: 'PÓS-LOGIN', confidence: 'provável',
+        label: 'API de jogo vaza resultado antes do reveal',
+        url,
+        currentValue: `endpoint devolveu ${what} com a rodada ainda ativa (HTTP ${r.status})`,
+        risk: 'A API do jogo expõe o resultado (seed ou posições) antes do fim da rodada. Um jogador consegue ler a resposta e prever/garantir a jogada vencedora, quebrando o "provably fair" e drenando a banca da casa.',
+        recommendation: 'Nunca enviar server seed nem posições/minas ao cliente antes do reveal. Guardar o resultado no servidor e só divulgar o server seed (para verificação) após a rodada terminar. Validar cada jogada no backend.',
+      });
+    }
+  }
+  return findings;
+}

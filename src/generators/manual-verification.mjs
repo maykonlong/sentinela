@@ -89,6 +89,38 @@ function hostAndPort(f, defaultPort = 443, fallbackUrl = '') {
 const VERIFICATION_MAP = {
 
   // ════════════════════════════════════════════════════
+  // INJEÇÃO / LÓGICA DE NEGÓCIO (Tier 3 ativo)
+  // ════════════════════════════════════════════════════
+
+  sqli_suspected: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para SQL Injection`,
+      steps: [
+        `1. Teste focado: enviar uma aspa simples (') em um parâmetro do endpoint e observar a resposta.`,
+        `2. PROVA REAL: capturar a mensagem de erro do banco (MySQL/Postgres/MSSQL/Oracle/SQLite) devolvida — ela prova que a entrada chegou crua na query. Repetir com uma aspa dupla ('') deve fazer o erro sumir.`,
+      ],
+      devtools: `F12 → Network → reenviar a requisição adicionando ' a um parâmetro → conferir o corpo da resposta por erro de SQL.`,
+      automated: `curl -sk "${url}${url.includes('?') ? '&' : '?'}q=%27" | grep -iE "sql syntax|sqlstate|ORA-[0-9]|unterminated|SQLite"`,
+      proofOfWork: `curl -sk "${url}${url.includes('?') ? '&' : '?'}q=%27" | head -c 800`,
+    };
+  },
+
+  game_state_leak: (f, targetUrl) => {
+    const url = sanitizeUrl(f.url, targetUrl);
+    return {
+      title: `Validação & Prova Real para Vazamento de Estado de Jogo`,
+      steps: [
+        `1. Teste focado: iniciar uma rodada e, ANTES de revelar/finalizar, chamar o endpoint de estado (${url}).`,
+        `2. PROVA REAL: baixar o JSON completo (comando 2) e conferir se ele já contém o resultado — server seed em claro, posições de minas/bombas ou tile vencedor — com "status" ainda ativo. Se sim, o cliente consegue prever a jogada.`,
+      ],
+      devtools: `F12 → Network → abrir a chamada do jogo → aba Response → procurar campos como "mines", "server_seed", "grid", "outcome" enquanto a rodada está ativa.`,
+      automated: `curl -sk "${url}" | grep -iE "server_seed\\"|mines\\"|isMine|winning"`,
+      proofOfWork: `curl -sk "${url}" | head -c 1000`,
+    };
+  },
+
+  // ════════════════════════════════════════════════════
   // HEADERS DE SEGURANÇA
   // ════════════════════════════════════════════════════
 

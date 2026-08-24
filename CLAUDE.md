@@ -37,8 +37,8 @@ cancel                       # marca sessão ativa como cancelada
 
 - **`--json`**: TODOS os comandos passam a imprimir **uma linha JSON** no stdout,
   sem cor e sem emoji. Não parseie a saída bonita; ela é para humano.
-- **Exit codes**: `0` ok · `1` erro · `2` HIGH presente · `3` CRITICAL presente ·
-  `4` nenhuma sessão. Dá para usar como gate direto, sem ler o relatório.
+- **Exit codes** (`sentinela.mjs`): `0` ok · `1` erro · `2` HIGH presente ·
+  `3` CRITICAL presente · `4` nenhuma sessão. Gate direto, sem ler o relatório.
 - **`report` é o caminho principal da IA**: gera do que já está em disco, em
   segundos, sem abrir browser. Se existe sessão com achados, prefira `report` a
   `resume`.
@@ -49,14 +49,33 @@ cancel                       # marca sessão ativa como cancelada
 node sentinela.mjs report --json      # gera e devolve caminhos + score + counts
 ```
 
+### Caminho DIRETO (`node src/auditor.mjs <url>`) — sem daemon, p/ CI
+
+Ignora o daemon/sessões; roda uma auditoria e sai. Aceita:
+
+- **`--headless`**: usa o Chromium empacotado, sem janela (o padrão abre o Edge
+  visível). Combine com `--yes` e `--timeout=<s>` para rodar sem humano — mas
+  lembre: **sem login humano só a fase pré-login coleta de verdade** (login/
+  pós-login ficam vazios). Serve para checar o alvo e provar detectores, não
+  substitui a auditoria autenticada real.
+- **`--fail-on=critical|high|medium|low`**: gate de CI. Reprova se houver achado
+  de 1ª parte naquela severidade ou acima — **mesmos exit codes** do
+  `sentinela.mjs` (`3`=CRITICAL presente, `2`=HIGH/abaixo presente, `0`=limpo).
+- Sempre gera o **`.sarif`** (ver tabela abaixo), independente das flags.
+
+```bash
+node src/auditor.mjs https://alvo --active --yes --headless --fail-on=high
+```
+
 ## Como LER o relatório sem queimar contexto
 
-Cada auditoria gera 5 arquivos em `reports/`. Os tamanhos importam:
+Cada auditoria gera 6 arquivos em `reports/`. Os tamanhos importam:
 
 | arquivo | tamanho típico | quando usar |
 |---|---|---|
 | `*.summary.json` | **~23 KB** | **SEMPRE comece por aqui.** Score, categorias, counts e a lista de achados (tipo, severidade, subject, url, OWASP, nº de ocorrências). |
 | `*.json` | ~300 KB | Só quando precisar do detalhe de um achado específico. |
+| `*.sarif` | ~dezenas de KB | SARIF 2.1.0 p/ GitHub Code Scanning / DefectDojo / SonarQube. Cada achado com `ruleId`=type, `level`, OWASP/CWE e `security-severity`. |
 | `*.html` | ~250 KB | Entregável para humano. Não leia. |
 | `*.pdf` / `*.har` | MBs | Nunca leia. O HAR serve para importar no Burp/ZAP. |
 
@@ -121,10 +140,17 @@ Redesenhada. Regras atuais:
   `generateFromSession`), `session-store.mjs` (`sessions/<id>/*.ndjson`),
   `control-server.mjs` (HTTP `:3141`).
 - `src/rules/` — regras de detecção. `context-rules.mjs` tem `classifyResource`
-  e `sameRegistrableDomain` (use-os para 1ª vs 3ª parte).
+  e `sameRegistrableDomain` (use-os para 1ª vs 3ª parte). `active-rules.mjs`
+  (Tier 3, só com `--active`): métodos HTTP, arquivos sensíveis, IDOR,
+  `checkRateLimit`, `checkUserEnumeration`, **`checkSqlInjection`** (aspa → erro
+  de banco, error-based) e **`checkGameStateLeak`** (iGaming: vaza minas/seed
+  antes do reveal; só dispara se `looksLikeIgaming` reconhecer cassino/aposta).
 - `src/infra/` — TCP, DNS, DNSBL, GeoIP, timing.
 - `src/report/` — `dedup.mjs` (fonte única), `score-breakdown.mjs`, `labels.mjs`,
-  geradores HTML/MD/PDF.
+  `sarif-export.mjs` (`generateSarif`), geradores HTML/MD/PDF.
+- `src/generators/manual-verification.mjs` — "Como Verificar Manualmente" por
+  achado. **Todo `type:` novo precisa** de entrada aqui E no `owasp-map.mjs`,
+  senão `npm test` (owasp-map-coverage) reprova.
 - `reports/` — entregáveis. **Nenhum código do projeto apaga esse diretório** —
   se esvaziar sozinho, é externo (OneDrive/antivírus).
 - `sessions/` — estado bruto + `sessions/archived/`. Está no `.gitignore` porque

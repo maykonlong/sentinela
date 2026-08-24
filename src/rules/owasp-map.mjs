@@ -47,6 +47,7 @@ const MAP = {
 
   // A03 – Injection
   dangerous_code:             { owasp: 'A03:2021 – Injection (XSS)', cwe: 'CWE-79', confidence: 'provável' },
+  sqli_suspected:             { owasp: 'A03:2021 – Injection (SQL)', cwe: 'CWE-89', confidence: 'confirmado' },
 
   // A05 – Security Misconfiguration
   missing_security_header:    { owasp: 'A05:2021 – Security Misconfiguration', cwe: 'CWE-693', confidence: 'confirmado' },
@@ -83,6 +84,7 @@ const MAP = {
   // Diferente do suspected: veio de uma 2ª conta real acessando o objeto da
   // 1ª — prova, não heurística de troca de ID.
   idor_confirmed:             { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-639', confidence: 'confirmado' },
+  game_state_leak:            { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-200', confidence: 'provável' },
   broken_access_control:      { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-284', confidence: 'provável' },
   privilege_escalation:       { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-285', confidence: 'provável' },
   open_redirect:              { owasp: 'A01:2021 – Broken Access Control', cwe: 'CWE-601', confidence: 'confirmado' },

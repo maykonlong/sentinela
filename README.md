@@ -13,6 +13,7 @@ O Sentinela é uma ferramenta de auditoria de segurança web que resolve o probl
 - Todo o armazenamento local (localStorage, sessionStorage)
 - Código-fonte, scripts, variáveis globais e bibliotecas vulneráveis
 - Controle de acesso, IDOR/BOLA, session fixation, mixed content
+- **SQL Injection** (error-based) e, em contexto de cassino/aposta, **vazamento de estado de jogo** (provably-fair)
 - **[NOVO v2.0]** Port scan TCP, socket timing breakdown, GeoIP, reputação IP em blacklists DNS
 - **[NOVO v2.0]** Relatório empresarial HTML com selo A-F, sumário executivo, instruções de verificação manual por achado, screenshots, timeline e export PDF automático!
 
@@ -67,8 +68,12 @@ node src/auditor.mjs https://seu-alvo.com --login-only --yes
 # Auditoria completa com crawl de links internos
 npm run audit:crawl -- https://seu-alvo.com
 
-# Auditoria com testes ativos (IDOR, open redirect, .git/.env)
+# Auditoria com testes ativos (SQL Injection, IDOR, rate limit, enumeracao, game-state, open redirect, .git/.env)
 npm run audit:active -- https://seu-alvo.com
+
+# CI/automação: headless + gate. Reprova o build (exit 2) se houver achado
+# de 1ª parte com severidade >= high. Gera sempre o .sarif para o Code Scanning.
+node src/auditor.mjs https://seu-alvo.com --active --yes --headless --fail-on=high
 ```
 
 ---
@@ -120,7 +125,8 @@ Ao final de cada auditoria, o Sentinela gera automaticamente **5 entregáveis**:
 2. **`security-audit-*.pdf`** — Documento PDF formatado em A4 para apresentação a clientes e C-level.
 3. **`security-audit-*.md`** — Relatório Markdown completo para repositórios Git, Jira ou documentação técnica.
 4. **`security-audit-*.json`** — Dados brutos estruturados para integração em pipelines CI/CD ou SIEM.
-5. **`session-*.har`** — Registro completo do tráfego de rede importável diretamente no **Burp Suite** ou **OWASP ZAP**.
+5. **`security-audit-*.sarif`** — SARIF 2.1.0 para **GitHub Code Scanning**, DefectDojo, SonarQube e Azure DevOps (cada achado com OWASP, CWE e `security-severity`).
+6. **`session-*.har`** — Registro completo do tráfego de rede importável diretamente no **Burp Suite** ou **OWASP ZAP**.
 
 ---
 

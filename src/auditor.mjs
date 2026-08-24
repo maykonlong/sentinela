@@ -25,7 +25,7 @@ import { analyzeHeaders, analyzeProtocol, detectDuplicateHeaders } from './rules
 import { analyzeRequest, analyzeResponse } from './rules/network-rules.mjs';
 import { classifyResource, isMinified, sameRegistrableDomain } from './rules/context-rules.mjs';
 import { detectLibraries, detectAllLibraryVersions, checkOsvVulnerabilities } from './rules/library-rules.mjs';
-import { runActiveChecks, runIdorChecks, checkRateLimit, checkUserEnumeration, checkPasswordPolicyHints } from './rules/active-rules.mjs';
+import { runActiveChecks, runIdorChecks, checkRateLimit, checkUserEnumeration, checkPasswordPolicyHints, checkSqlInjection, checkGameStateLeak, looksLikeIgaming, pickGameEndpoints } from './rules/active-rules.mjs';
 import { crossAccountIdorCheck } from './rules/idor-cross-account.mjs';
 import { mapFinding } from './rules/owasp-map.mjs';
 import { runRecon, probePaths, diffAccessControl, testOpenRedirect, testBackupFiles, fingerprintFromCookies } from './rules/recon-rules.mjs';
@@ -55,6 +55,7 @@ import { computeScoreBreakdown } from './report/score-breakdown.mjs';
 import { generateEnterpriseHtml } from './report/html-report.mjs';
 import { generateEnterpriseMd } from './report/md-report.mjs';
 import { exportPdf } from './report/pdf-export.mjs';
+import { generateSarif } from './report/sarif-export.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -71,6 +72,7 @@ let activeMode = args.includes('--active');
 let secondAccountMode = args.includes('--second-account');
 let assumeYes = args.includes('--yes') || args.includes('-y');
 let recordHar = !args.includes('--no-har');
+let failOn = null;   // gate de CI: severidade mínima que reprova (exit != 0)
 let scope = null;
 let loginTimeout = 300000;
 let navIdleMs = 180000;
@@ -96,6 +98,15 @@ function parseConfiguration() {
 
   const idleArg = args.find(a => a.startsWith('--idle'));
   navIdleMs = idleArg ? parseInt(idleArg.split('=')[1] || args[args.indexOf('--idle') + 1]) * 1000 : 180000;
+
+  // Gate de CI: --fail-on=<severidade> reprova (exit != 0) se houver achado de
+  // 1ª parte naquela severidade ou acima. Aceita também "--fail-on high" (espaço).
+  const foArg = args.find(a => a.startsWith('--fail-on'));
+  if (foArg) {
+    const raw = (foArg.includes('=') ? foArg.split('=')[1] : args[args.indexOf(foArg) + 1] || '').toUpperCase();
+    const valid = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+    failOn = valid.includes(raw) ? raw : 'HIGH'; // padrão sensato se vier vazio/errado
+  }
 }
 
 // Nota: a validação de `targetUrl` NÃO pode rodar aqui no top-level do módulo.
@@ -125,6 +136,9 @@ function printUsageAndExit() {
   console.log(chalk.gray('  --second-account  IDOR com 2 contas reais (exige --active). Pausa a'));
   console.log(chalk.gray('               auditoria pedindo um SEGUNDO login humano.'));
   console.log(chalk.gray('  --no-har     Não gravar o arquivo HAR da sessão'));
+  console.log(chalk.gray('  --headless   Rodar sem janela (CI/automação; usa Chromium)'));
+  console.log(chalk.gray('  --fail-on=X  Gate CI: reprova (exit 2) se houver achado 1ª parte'));
+  console.log(chalk.gray('               >= X (critical|high|medium|low). Sempre gera SARIF.'));
   console.log(chalk.gray('  --yes / -y   Não perguntar nada, usar padrões/flags'));
   process.exit(1);
 }
@@ -1188,6 +1202,7 @@ function generateReport(findings) {
   const reportMdPath = join(reportDir, `security-audit-${timestamp}.md`);
   const reportHtmlPath = join(reportDir, `security-audit-${timestamp}.html`);
   const reportPdfPath = join(reportDir, `security-audit-${timestamp}.pdf`);
+  const reportSarifPath = join(reportDir, `security-audit-${timestamp}.sarif`);
 
   // Enriquecer com OWASP / CWE / confiança
   for (const f of findings) {
@@ -1249,6 +1264,16 @@ function generateReport(findings) {
   // Salvar JSON
   writeFileSync(reportPath, JSON.stringify(reportData, null, 2), 'utf8');
 
+  // Salvar SARIF 2.1.0 (GitHub Code Scanning, DefectDojo, SonarQube, etc.)
+  let reportSarifGenerated = false;
+  try {
+    const sarif = generateSarif(reportData);
+    writeFileSync(reportSarifPath, JSON.stringify(sarif, null, 2), 'utf8');
+    reportSarifGenerated = true;
+  } catch (err) {
+    console.log(chalk.gray(`  (SARIF export falhou: ${err.message})`));
+  }
+
   // Salvar Markdown empresarial
   const mdContent = generateEnterpriseMd({
     ...reportData,
@@ -1281,7 +1306,7 @@ function generateReport(findings) {
     reportPdfGenerated = true;
   } catch { /* PDF export falhou */ }
 
-  return { reportPath, reportMdPath, reportHtmlPath, reportPdfPath, counts, thirdCounts, score, regression };
+  return { reportPath, reportMdPath, reportHtmlPath, reportPdfPath, reportSarifPath, reportSarifGenerated, counts, thirdCounts, score, regression };
 }
 
 // Extrai os VALORES capturados de um finding (para o relatório detalhado).
@@ -1477,12 +1502,17 @@ async function main() {
   // Iniciar Playwright com navegador do sistema (Edge) em janela InPrivate/limpa.
   // Cada execução usa perfil temporário isolado — sem cookies, histórico ou
   // sessão anteriores. O --inprivate reforça isso e deixa visível pro usuário.
-  console.log(chalk.cyan('\n🚀 Abrindo navegador (Microsoft Edge — janela InPrivate/limpa)...'));
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'msedge', // Usa o Edge instalado no sistema
-    args: ['--start-maximized', '--inprivate'],
-  });
+  const headlessMode = args.includes('--headless');
+  console.log(chalk.cyan(headlessMode
+    ? '\n🚀 Abrindo navegador (headless — Chromium, p/ CI/automação)...'
+    : '\n🚀 Abrindo navegador (Microsoft Edge — janela InPrivate/limpa)...'));
+  const browser = await chromium.launch(headlessMode
+    ? { headless: true } // CI/automação: Chromium empacotado, sem janela nem canal
+    : {
+        headless: false,
+        channel: 'msedge', // Usa o Edge instalado no sistema
+        args: ['--start-maximized', '--inprivate'],
+      });
 
   // Preparar caminho do HAR (export p/ Burp/ZAP + bodies como evidência).
   const reportsDir = join(dirname(__dirname), 'reports');
@@ -2403,6 +2433,62 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════
+  //  💉 SQL INJECTION (error-based) — só com --active
+  // ══════════════════════════════════════════════════════════
+  // Injeta uma aspa simples no endpoint de login (POST) e em rotas GET com
+  // parâmetro, e procura mensagem de erro de banco na resposta. Erro de rede
+  // num endpoint pula só aquele endpoint (ausência de evidência ≠ evidência).
+  if (activeMode) {
+    try {
+      const sqliCandidates = [];
+      if (loginFormMeta?.actionUrl) {
+        const fn = (loginFormMeta.userField || loginFormMeta.passField)
+          ? { user: loginFormMeta.userField || 'username', pass: loginFormMeta.passField || 'password' }
+          : null;
+        const form = fn ? { [fn.user]: 'a', [fn.pass]: 'b' } : { username: 'a', email: 'a', password: 'b', senha: 'b' };
+        sqliCandidates.push({ url: loginFormMeta.actionUrl, method: 'POST', form });
+      }
+      let proto = 'https:';
+      try { proto = new URL(targetUrl).protocol; } catch { /* usa https */ }
+      for (const r of capturedRoutes) {
+        if (!r || r.thirdParty) continue;
+        if ((r.method || 'GET').toUpperCase() === 'GET' && r.query && r.host && r.path) {
+          sqliCandidates.push({ url: `${proto}//${r.host}${r.path}${r.query}`, method: 'GET' });
+        }
+      }
+      if (sqliCandidates.length > 0) {
+        console.log(chalk.magenta(`\n💉 Teste ativo de SQL Injection (${Math.min(8, sqliCandidates.length)} endpoint(s))...`));
+        const sqliFindings = await checkSqlInjection(context.request, sqliCandidates);
+        if (sqliFindings.length > 0) { console.log(chalk.red(`  ⚠️  ${sqliFindings.length} possível(is) SQL Injection!`)); sqliFindings.forEach(logFinding); }
+        else console.log(chalk.green('  ✅ Nenhum erro de SQL vazado nos endpoints testados.'));
+        allFindings.push(...sqliFindings);
+      }
+    } catch (err) { console.log(chalk.gray(`  (SQLi: ${err.message})`)); }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  🎰 VAZAMENTO DE ESTADO DE JOGO (iGaming) — só com --active e em cassino/aposta
+  // ══════════════════════════════════════════════════════════
+  if (activeMode) {
+    try {
+      let pageTitle = '';
+      try { pageTitle = await page.title(); } catch { /* ignore */ }
+      if (looksLikeIgaming(targetUrl, pageTitle, capturedRoutes)) {
+        let proto = 'https:';
+        try { proto = new URL(targetUrl).protocol; } catch { /* usa https */ }
+        const gameEndpoints = pickGameEndpoints(capturedRoutes, proto);
+        if (gameEndpoints.length > 0) {
+          console.log(chalk.magenta(`\n🎰 Contexto iGaming — testando ${gameEndpoints.length} endpoint(s) de jogo por vazamento de resultado...`));
+          const gameFindings = await checkGameStateLeak(context.request, gameEndpoints);
+          if (gameFindings.length > 0) { console.log(chalk.red(`  ⚠️  ${gameFindings.length} vazamento(s) de estado de jogo!`)); gameFindings.forEach(logFinding); }
+          else console.log(chalk.green('  ✅ Nenhum vazamento de estado nos endpoints de jogo testados.'));
+          allFindings.push(...gameFindings);
+        }
+      }
+    } catch (err) { console.log(chalk.gray(`  (game-state: ${err.message})`)); }
+  }
+
+  // ══════════════════════════════════════════════════════════
   //  ⚖️ MÓDULO LGPD & COMPLIANCE DE PRIVACIDADE
   // ══════════════════════════════════════════════════════════
   try {
@@ -2468,7 +2554,7 @@ async function main() {
 
   // Gerar relatório
   console.log(chalk.cyan('\n📝 Gerando relatório...'));
-  const { reportPath, reportMdPath, reportHtmlPath, counts, thirdCounts, score, regression } = generateReport(uniqueFindings);
+  const { reportPath, reportMdPath, reportHtmlPath, reportSarifPath, reportSarifGenerated, counts, thirdCounts, score, regression } = generateReport(uniqueFindings);
 
   // Resumo final (SÓ 1ª parte)
   const totalIssues = counts.CRITICAL + counts.HIGH + counts.MEDIUM + counts.LOW;
@@ -2500,6 +2586,7 @@ async function main() {
   console.log(chalk.white(`║  📁 Relatório JSON: ${reportPath.substring(reportPath.lastIndexOf('\\') + 1).padEnd(37)}║`));
   console.log(chalk.white(`║  📄 Relatório MD:   ${reportMdPath.substring(reportMdPath.lastIndexOf('\\') + 1).padEnd(37)}║`));
   console.log(chalk.white(`║  🌐 Relatório HTML: ${reportHtmlPath.substring(reportHtmlPath.lastIndexOf('\\') + 1).padEnd(37)}║`));
+  if (reportSarifGenerated) console.log(chalk.white(`║  🧩 SARIF (CI/scan): ${reportSarifPath.substring(reportSarifPath.lastIndexOf('\\') + 1).padEnd(37)}║`));
   console.log(chalk.cyan.bold(`╚════════════════════════════════════════════════════════════╝`));
 
   if (regression && regression.hasPrev) {
@@ -2516,6 +2603,24 @@ async function main() {
     console.log(chalk.gray(`\n📦 HAR (rede completa, importável no Burp/ZAP): ${harPath.substring(harPath.lastIndexOf('\\') + 1)}`));
   }
   await browser.close();
+
+  // ── GATE de CI (--fail-on) ────────────────────────────────
+  // Reprova quando há achado de 1ª parte na severidade-alvo ou acima. Sem a
+  // flag, mantém o comportamento antigo (exit 0). Determinístico: conta achados
+  // reais, nunca reprova por ausência de dado. Exit codes na MESMA convenção do
+  // sentinela.mjs: 3=CRITICAL presente, 2=HIGH (ou MEDIUM/LOW) presente, 0=ok.
+  if (failOn) {
+    const ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+    const offending = ORDER.slice(0, ORDER.indexOf(failOn) + 1);
+    const total = offending.reduce((s, sev) => s + (counts[sev] || 0), 0);
+    if (total > 0) {
+      const detail = offending.filter(sev => counts[sev] > 0).map(sev => `${counts[sev]} ${sev}`).join(', ');
+      const code = counts.CRITICAL > 0 ? 3 : 2;
+      console.log(chalk.red.bold(`\n🚦 GATE: NO-GO — ${total} achado(s) de 1ª parte >= ${failOn} (${detail}). Exit ${code}.`));
+      process.exit(code);
+    }
+    console.log(chalk.green.bold(`\n🚦 GATE: GO — nenhum achado de 1ª parte >= ${failOn}. Exit 0.`));
+  }
   process.exit(0);
 }
 
