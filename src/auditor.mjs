@@ -168,6 +168,7 @@ const documentHeaders = new Map();
 let lastNavActivity = 0;              // timestamp da última página nova (modo navegação)
 let liveAuditActive = false;         // audita ativamente cada página nova (só no modo navegação, pós-login)
 let liveAuditBusy = false;           // trava contra collectPageData concorrente na mesma page
+let dynamicAudits = 0;               // nº de re-auditorias por mutação de DOM (com teto p/ não disparar sem fim)
 const firstPartyAssets = [];         // URLs de JS/CSS do seu domínio (p/ backup guessing)
 const seenAssets = new Set();
 let reconCandidatePaths = [];         // paths do recon (robots/sitemap/dicionário)
@@ -1138,6 +1139,27 @@ async function auditPageIfNew(page, rawUrl, reason) {
   }
 }
 
+// Re-auditoria por MUTAÇÃO de DOM: cobre o caso "cliquei num botão, a URL não
+// mudou e não houve requisição, mas um modal/form/campo novo apareceu". A URL é
+// a mesma (routeKey não serve p/ dedup aqui), então rodamos collectPageData de
+// novo e deixamos o dedup do relatório colapsar repetições. Debounce fica no
+// MutationObserver (lado do browser); aqui há trava e TETO para não rodar sem fim.
+async function reauditDynamic(page, reason) {
+  if (!liveAuditActive || liveAuditBusy || dynamicAudits >= 25) return;
+  liveAuditBusy = true;
+  dynamicAudits++;
+  try {
+    console.log(chalk.cyan(`  🔄 ${reason} — reauditando (DOM mudou sem navegar)`));
+    const findings = await collectPageData(page, page.url());
+    allFindings.push(...findings.map(f => ({ ...f, phase: 'PÓS-LOGIN' })));
+    lastNavActivity = Date.now();
+  } catch (e) {
+    console.log(chalk.gray(`  (reauditoria dinâmica pulada: ${e.message})`));
+  } finally {
+    liveAuditBusy = false;
+  }
+}
+
 function startLivePageAuditor(page) {
   liveAuditActive = true; // habilita também o framenavigated e os hooks de SPA
   // NÃO inicia o relógio de inatividade aqui: só começa a contar depois da
@@ -1566,6 +1588,12 @@ async function main() {
     await page.exposeFunction('__sentinelaRoute', (u) => {
       if (liveAuditActive) auditPageIfNew(page, u || page.url(), 'rota SPA (History API)').catch(() => {});
     });
+    // Re-auditoria quando o DOM ganha conteúdo relevante SEM navegar (modal com
+    // login, form/iframe injetado por clique). Só dispara em mutação significativa
+    // (form/input/iframe/dialog), com debounce, para não reagir a cada micro-mudança.
+    await page.exposeFunction('__sentinelaMutation', () => {
+      if (liveAuditActive) reauditDynamic(page, 'conteúdo dinâmico (clique/modal)').catch(() => {});
+    });
     await page.addInitScript(() => {
       const notify = () => { try { window.__sentinelaRoute && window.__sentinelaRoute(location.href); } catch { /* ignore */ } };
       for (const m of ['pushState', 'replaceState']) {
@@ -1576,6 +1604,28 @@ async function main() {
       }
       window.addEventListener('popstate', notify);
       window.addEventListener('hashchange', notify);
+
+      // MutationObserver: re-auditoria só quando surge algo com superfície de
+      // segurança (formulário, campo, iframe, diálogo). Debounce de 900ms.
+      let t;
+      const fire = () => { clearTimeout(t); t = setTimeout(() => { try { window.__sentinelaMutation && window.__sentinelaMutation(); } catch { /* ignore */ } }, 900); };
+      const SEL = 'form, input, textarea, select, iframe, dialog, [role="dialog"], [type="password"]';
+      const significant = (n) => n && n.nodeType === 1 && (
+        (typeof n.matches === 'function' && n.matches(SEL)) ||
+        (typeof n.querySelector === 'function' && !!n.querySelector(SEL))
+      );
+      const start = () => {
+        const target = document.body || document.documentElement;
+        if (!target) { setTimeout(start, 200); return; }
+        try {
+          new MutationObserver((muts) => {
+            for (const mu of muts) {
+              for (const n of mu.addedNodes) { if (significant(n)) { fire(); return; } }
+            }
+          }).observe(target, { childList: true, subtree: true });
+        } catch { /* ignore */ }
+      };
+      start();
     });
   } catch { /* exposeFunction/addInitScript já registrados — ok */ }
 
