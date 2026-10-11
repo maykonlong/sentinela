@@ -1,5 +1,11 @@
 # Sentinela — guia operacional para IA
 
+Integração Blindar (Claude/Codex): `report --json` retorna `reports.sarif`.
+Antes da auditoria defina `SENTINELA_GIT_SHA` com o SHA implantado no alvo.
+O relatório preserva a data original da medição; gerar novamente não renova
+evidência antiga. A lista de fases não comprova autenticação. Consulte a seção
+Integração Blindar no README para importação explícita e recálculo dos gates.
+
 Leia este arquivo antes de explorar o código. Ele existe para você não precisar
 reler `src/auditor.mjs` (2300+ linhas) nem redescobrir os mesmos bugs a cada sessão.
 Detalhes de features/arquitetura: [README.md](README.md).

@@ -346,7 +346,7 @@ async function cmdReport(sessionId) {
     counts,
     reports: {
       html: paths.htmlPath, md: paths.mdPath, json: paths.jsonPath,
-      pdf: paths.pdfPath, summary: paths.summaryPath,
+      pdf: paths.pdfPath, summary: paths.summaryPath, sarif: paths.sarifPath,
     },
   }, () => {
     console.log(chalk.green(`\n✅ Relatório gerado:`));

@@ -18,6 +18,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, existsSync } from 'fs';
 import chalk from 'chalk';
+import { generateSarif } from '../report/sarif-export.mjs';
 
 import * as store from './session-store.mjs';
 import { startControlServer, updateServerState, controlEvents, setReportPath } from './control-server.mjs';
@@ -232,6 +233,7 @@ export async function generateFromSession(sessionId) {
   const htmlPath = pathJoin(reportsDir, `security-audit-${stamp}.html`);
   const mdPath = pathJoin(reportsDir, `security-audit-${stamp}.md`);
   const jsonPath = pathJoin(reportsDir, `security-audit-${stamp}.json`);
+  const sarifPath = pathJoin(reportsDir, `security-audit-${stamp}.sarif`);
   const pdfPath = pathJoin(reportsDir, `security-audit-${stamp}.pdf`);
 
   const reportMeta = {
@@ -251,6 +253,11 @@ export async function generateFromSession(sessionId) {
     gradeLabel: scoreBreakdown.gradeLabel,
     phases: ['PRÉ-LOGIN', 'LOGIN', 'PÓS-LOGIN'],
     sessionId,
+    git_sha: meta.git_sha,
+    auditTimestamp: meta.auditCompletedAt || meta.finishedAt || meta.startedAt,
+    // Report reconstruído de disco não comprova que a auditoria terminou.
+    executionSuccessful: meta.executionSuccessful === true,
+    authenticated: meta.authenticated === true,
   };
 
   function evidenceOf(f) {
@@ -278,6 +285,7 @@ export async function generateFromSession(sessionId) {
 
   // Salvar JSON completo
   writeFileSync(jsonPath, JSON.stringify(reportData, null, 2), 'utf8');
+  writeFileSync(sarifPath, JSON.stringify(generateSarif(reportData), null, 2), 'utf8');
 
   // Salvar SUMMARY enxuto — pensado para ser lido por IA/automação.
   // O JSON completo passa de 300 KB (só `manualVerification` é ~1/3 dele) e
@@ -319,7 +327,7 @@ export async function generateFromSession(sessionId) {
       occurrences: f.occurrenceCount || 1,
       risk: typeof f.risk === 'string' ? f.risk.slice(0, 240) : null,
     })),
-    reports: { html: htmlPath, md: mdPath, json: jsonPath, pdf: pdfPath },
+    reports: { html: htmlPath, md: mdPath, json: jsonPath, pdf: pdfPath, sarif: sarifPath },
   };
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2), 'utf8');
 
@@ -352,7 +360,7 @@ export async function generateFromSession(sessionId) {
     console.log(chalk.gray(`  (PDF: ${err.message})`));
   });
 
-  return { htmlPath, mdPath, jsonPath, pdfPath, summaryPath, scoreBreakdown, counts };
+  return { htmlPath, mdPath, jsonPath, pdfPath, sarifPath, summaryPath, scoreBreakdown, counts };
 }
 
 // ── Função principal exportada ────────────────────────────────
@@ -421,9 +429,11 @@ export async function startDaemon(targetUrl, opts = {}) {
     screenshotRequestCallback = () => hooks.onScreenshot && hooks._requestScreenshot?.();
 
     // Executar auditoria com hooks de sessão
-    await runAudit(targetUrl, { scope, activeMode }, hooks, finalizePromise);
+    const outcome = await runAudit(targetUrl, { scope, activeMode }, hooks, finalizePromise);
+    store.updateMeta(sessionId, { executionSuccessful: outcome?.completed === true, git_sha: process.env.SENTINELA_GIT_SHA, auditCompletedAt: new Date().toISOString() });
 
   } catch (err) {
+    store.updateMeta(sessionId, { executionSuccessful: false });
     console.error(chalk.red(`\n❌ Erro no auditor: ${err.message}`));
     store.appendTimeline(sessionId, `Erro: ${err.message}`, 'error');
   }

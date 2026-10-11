@@ -1,6 +1,6 @@
 {
   "name": "sentinela",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Sentinela — Enterprise Security Auditor v2.1 (Sessões Persistentes + Daemon + Relatórios Completos)",
 
   "type": "module",
@@ -16,7 +16,7 @@
     "audit":         "node src/auditor.mjs",
     "audit:crawl":   "node src/auditor.mjs --crawl",
     "audit:active":  "node src/auditor.mjs --active",
-    "test":          "node test/owasp-map-coverage.mjs && node scratch/test_snippets.mjs",
+    "test":          "node test/owasp-map-coverage.mjs && node scratch/test_snippets.mjs && node --test test/sarif-blindar.test.mjs",
     "test:owasp":    "node test/owasp-map-coverage.mjs"
   },
   "dependencies": {

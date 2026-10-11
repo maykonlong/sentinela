@@ -37,7 +37,7 @@ function cweTags(cwe) {
 export function generateSarif(reportData, opts = {}) {
   const meta = reportData.meta || {};
   const target = meta.target || '';
-  const toolVersion = opts.toolVersion || '2.1.0';
+  const toolVersion = opts.toolVersion || '2.1.1';
   const infoUri = opts.infoUri || 'https://github.com/maykonlong/sentinela';
 
   const issues = [
@@ -111,12 +111,17 @@ export function generateSarif(reportData, opts = {}) {
       // Metadados do alvo/execução (não-padrão, mas SARIF permite properties).
       properties: {
         target,
-        timestamp: meta.timestamp,
+        timestamp: meta.auditTimestamp || meta.timestamp,
+        git_sha: meta.git_sha || opts.gitSha,
+        sessionId: meta.sessionId,
+        // Lista de fases configuradas não comprova login nem conclusão.
+        authenticated: meta.authenticated === true,
         score: meta.score,
         grade: meta.grade,
         firstPartyIssues: meta.firstPartyIssues,
         thirdPartyIssues: meta.thirdPartyIssues,
       },
+      invocations: [{ executionSuccessful: meta.executionSuccessful === true }],
       results,
     }],
   };
