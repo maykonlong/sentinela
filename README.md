@@ -1,4 +1,4 @@
-# 🛡️ Sentinela v2.0 — Enterprise Vulnerability Collector & Security Auditor
+# 🛡️ Sentinela v2.1.1 — Enterprise Vulnerability Collector & Security Auditor
 
 > **Auditor de Segurança Web & Diagnóstico de Infraestrutura** guiado por navegador real (Microsoft Edge InPrivate). Combina auditoria de código/DOM/rede com varredura de infraestrutura TCP, socket timing, GeoIP, reputação IP e relatórios executivos para relatórios corporativos completos.
 
@@ -143,3 +143,21 @@ Ao final de cada auditoria, o Sentinela gera automaticamente **5 entregáveis**:
 ## 🔒 Licença & Aviso Legal
 
 Este projeto é destinado exclusivamente a testes de segurança em sistemas próprios ou devidamente autorizados. O uso em alvos sem permissão expressa é ilegal.
+
+## Integração Blindar — v2.1.1
+
+`report --json` agora retorna `reports.sarif` também no modo de sessões.
+Antes da auditoria, defina `SENTINELA_GIT_SHA` com o SHA completo implantado
+no alvo. O SARIF registra alvo, data original da medição, sessão e conclusão;
+gerar um relatório novo de uma sessão antiga não renova a evidência.
+Login confirmado é um campo separado e não é inferido da lista de fases.
+
+No projeto auditado, importe explicitamente o artefato e recalcule os gates:
+
+```sh
+bash "$BLINDAR_SKILL_ROOT/scripts/sentinela-bridge.sh" --ingest arquivo.sarif --url https://homolog.example/ --git-sha SHA_COMPLETO
+bash "$BLINDAR_SKILL_ROOT/templates/checks/check-release-gates.sh"
+```
+
+Sem metadados completos, achados são preservados mas o Blindar não considera
+a execução uma prova válida de runtime. SARIF inválido bloqueia o gate.

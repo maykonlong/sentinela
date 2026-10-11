@@ -265,7 +265,7 @@ export async function runAudit(url, opts = {}, hooks = null, finalizePromise = n
     });
   }
 
-  await main();
+  return await main();
 }
 
 // Snapshots para comparação before/after login
@@ -1289,6 +1289,8 @@ function generateReport(findings) {
     meta: {
       target: targetUrl,
       timestamp: new Date().toISOString(),
+      git_sha: process.env.SENTINELA_GIT_SHA,
+      executionSuccessful: true,
       pagesAudited: visitedUrls.size,
       totalFindings: enrichedFindings.length,
       firstPartyIssues: firstPartyIssues.length,
@@ -2742,6 +2744,10 @@ async function main() {
     console.log(chalk.gray(`\n📦 HAR (rede completa, importável no Burp/ZAP): ${harPath.substring(harPath.lastIndexOf('\\') + 1)}`));
   }
   await browser.close();
+
+  // Importado pelo daemon: devolva controle para persistir conclusão e gerar
+  // o relatório da sessão. process.exit encerrava o daemon antes desses passos.
+  if (_sessionHooks) return { completed: true, counts, thirdCounts };
 
   // ── GATE de CI (--fail-on) ────────────────────────────────
   // Reprova quando há achado de 1ª parte na severidade-alvo ou acima. Sem a
